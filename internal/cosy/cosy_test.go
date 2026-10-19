@@ -96,7 +96,7 @@ func TestBuildAuthHeadersShape(t *testing.T) {
 		"Cosy-Machineid":    "m-1",
 		"Cosy-Machinetoken": "m-1",
 		"Cosy-Machinetype":  "5",
-		"Cosy-Clienttype":   "5",
+		"Cosy-Clienttype":   "10",
 		"Cosy-Sigpath":      "/api/v2/service/pro/sse/agent_chat_generation",
 		"Cosy-Bodylength":   strconv.Itoa(len(body)),
 		"Login-Version":     "v2",

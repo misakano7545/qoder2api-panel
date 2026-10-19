@@ -49,7 +49,7 @@ func TestBuildUpstreamBody(t *testing.T) {
 	}
 	body := buildUpstreamBody(in, model, "u-1")
 
-	if body["session_type"] != "qodercli" || body["agent_id"] != "agent_common" {
+	if body["session_type"] != "app" || body["agent_id"] != "agent_common" {
 		t.Errorf("信封字段不对: %v", body)
 	}
 	if body["stream"] != true {

@@ -30,7 +30,8 @@ func buildAuthHeaders(body []byte, rawURL string, a *authState) (map[string]stri
 
 // 上游信封固定字段（照官方客户端，不要自创）。
 const (
-	upstreamSessionType = "qodercli"
+	// upstreamSessionType 实测为 "app"（客户端形态是桌面 App，不是 CLI）。
+	upstreamSessionType = "app"
 	upstreamAgentID     = "agent_common"
 	upstreamChatTask    = "FREE_INPUT"
 )
@@ -326,7 +327,11 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 	lastUser := lastUserText(messages)
 	sessionSeed := firstString(in["user"], in["session_id"])
 
-	parameters := map[string]any{"max_tokens": limit}
+	parameters := map[string]any{
+		"max_tokens":     limit,
+		// 实测必带：上游按这个值决定上下文预算，缺了会被截断成默认。
+		"context_length": model.ContextWindow,
+	}
 	if thinking.Enable != nil {
 		if *thinking.Enable {
 			parameters["enable_thinking"] = true
@@ -359,8 +364,9 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 		"chat_prompt":      "",
 		"image_urls":       nil,
 		"aliyun_user_type": "",
-		// 上游不看顶层 system：system 提示必须留在 messages 里。
-		"system":     "",
+		// 实测 system 是 [{type:text,text:…}] 的块数组（与 messages[0] 同内容），
+		// 不是空串；messages 里的 system 轮次同样必须保留。
+		"system":     systemBlocks(lastUser),
 		"messages":   messages,
 		"tools":      tools,
 		"parameters": parameters,
@@ -379,14 +385,17 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 			"text":     lastUser,
 		},
 		"model_config": slimModelConfig(model),
+		// 实测 business.product = app、version = COSY 版本、id = request_set_id
+		//（与顶层同一个值），并带 model_key。
 		"business": map[string]any{
-			"product":  "cli",
-			"version":  "1.0.0",
-			"type":     "agent",
-			"stage":    "start",
-			"id":       randomUUIDOrEmpty(),
-			"name":     truncate(lastUser, 30),
-			"begin_at": time.Now().UnixMilli(),
+			"product":   cosy.BusinessProduct,
+			"version":   cosy.GatewayVersion,
+			"type":      cosy.BusinessType,
+			"stage":     "start",
+			"id":        recordID,
+			"name":      truncate(lastUser, 40),
+			"begin_at":  time.Now().UnixMilli(),
+			"model_key": model.UpstreamKey,
 		},
 	}
 }
@@ -394,15 +403,31 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 // slimModelConfig 精简发往上游的 model_config：必须剥掉 thinking_config，
 // 否则会覆盖 parameters.enable_thinking，导致「关闭思考」失效。
 func slimModelConfig(model ModelInfo) map[string]any {
+	// 实测字段：key/display_name/model/format/is_vl/is_reasoning/
+	// api_key/url/source/max_input_tokens。thinking_config 仍然必须剥掉，
+	// 否则会覆盖 parameters.enable_thinking。
 	slim := map[string]any{
-		"key":          model.UpstreamKey,
-		"is_reasoning": model.Reasoning,
-		"is_vl":        model.VL,
+		"key":              model.UpstreamKey,
+		"display_name":     model.Name,
+		"model":            "",
+		"format":           "openai",
+		"api_key":          "",
+		"url":              "",
+		"is_vl":            model.VL,
+		"is_reasoning":     model.Reasoning,
+		"max_input_tokens": model.ContextWindow,
 	}
 	if model.Source != "" {
 		slim["source"] = model.Source
+	} else {
+		slim["source"] = "system"
 	}
 	return slim
+}
+
+// systemBlocks 生成上游要的 system 块数组。
+func systemBlocks(text string) []any {
+	return []any{map[string]any{"type": "text", "text": text}}
 }
 
 // lastUserText 取最后一条用户文本（上游要求带在 context 与 business 里）。

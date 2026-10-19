@@ -527,6 +527,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", c.currentUA())
+	// 实测 chat 请求必带这两个头：上游按 X-Model-Key 路由模型档位，
+	// 缺失时会被当成 Auto 处理（表现为「发出去但没按选的模型回」）。
+	req.Header.Set("X-Model-Key", plan.model.UpstreamKey)
+	if source := plan.model.Source; source != "" {
+		req.Header.Set("X-Model-Source", source)
+	} else {
+		req.Header.Set("X-Model-Source", "system")
+	}
 
 	c.timeoutMu.RLock()
 	resp, err := c.streamClient().Do(req)

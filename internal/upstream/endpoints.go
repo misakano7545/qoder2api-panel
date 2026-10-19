@@ -44,6 +44,26 @@ const (
 	campaignsQuery    = "?forceRefresh=true"
 	deviceRefreshPath = "/api/v1/deviceToken/refresh"
 	jobRefreshPath    = "/api/v1/jobToken/refresh"
+	// UserStatusPath / QCSResolvePath 是客户端启动时的用户态与特性开关。
+	UserStatusPath = "/api/v3/user/status"
+	QCSResolvePath = "/api/v1/qcs/config/resolve"
+	// DataPolicyPath 在 chat 前读取数据策略（disagree / agree）。
+	DataPolicyPath = "/algo/api/v2/config/getDataPolicy"
+)
+
+// 网关探测与调度路径（/algo 一族，实测每次启动都会打）。
+const (
+	// PingPath 是网关存活探针：客户端对 center/api2/api3/openapi/repo2/qts2
+	// 逐个 ping，取最快的那个当出口。
+	PingPath = "algo/api/v1/ping"
+	// RegionEndpointsPath 返回分区端点表（centerNodes/inferNodes/openapiNodes/
+	// security/codebase/remoteAgent/nesNodes/fastMode/fallbackIpMap）。
+	RegionEndpointsPath = "algo/api/v5/service/region/endpoints"
+	// RegionEndpointsPathV3 是旧版本号，客户端会先用 v5 再回落 v3。
+	RegionEndpointsPathV3 = "algo/api/v3/service/region/endpoints"
+	// QueueStatusPath 是排队查询：排队态**不是**靠错误码判断的，
+	// 而是轮询这里拿 isQueued / queueCount / waitTime / retryAfterSeconds。
+	QueueStatusPath = "algo/api/v2/service/ask/queue/status"
 )
 
 // 推理网关（/algo/... 一族）上的路径。
@@ -56,10 +76,24 @@ const (
 
 // 默认主机基址。配置可覆盖（面板 upstream 段），这里只是兜底。
 const (
-	AgentHost     = "https://api3.qoder.sh/" // 国际版推理网关
+	AgentHost     = "https://api3.qoder.sh/" // 国际版推理网关（region/inferNodes）
 	AgentHostIntl = "https://api3.qoder.sh/" // 兼容旧配置键：国际版推理网关
 	GatewayCN     = "https://gateway.qoder.com.cn/"
+	// 实测 host 角色（/algo/api/v5/service/region/endpoints 返回）：
+	//   centerNodes   center.qoder.sh   —— 端点表、数据策略、更新检查
+	//   inferNodes    api3.qoder.sh     —— agent_chat_generation / model list / queue
+	//   openapiNodes  openapi.qoder.sh  —— userinfo / plan / qcs / deviceToken
+	//   security      api2.qoder.sh     —— 遥测 OTLP（不是「jt- 分流」）
+	//   codebase      repo2.qoder.sh
+	//   remoteAgent   qts2.qoder.sh
+	//   nesNodes      api5.qoder.com.cn —— 仅国内版
+	//   fastMode      api6.qoder.com.cn —— 仅国内版
+	CenterGlobal  = "https://center.qoder.sh/"
 	API2Global    = "https://api2.qoder.sh/"
+	API5CN        = "https://api5.qoder.com.cn/"
+	API6CN        = "https://api6.qoder.com.cn/"
+	Repo2Global   = "https://repo2.qoder.sh/"
+	QTS2Global    = "https://qts2.qoder.sh/"
 	OpenAPIGlobal = "https://openapi.qoder.sh"
 	OpenAPICN     = "https://openapi.qoder.com.cn"
 	WebGlobal     = "https://qoder.com"
@@ -77,10 +111,12 @@ const (
 	// SashClientType 必须为 10（IDE 形态拿不到签到活动）。
 	SashClientType = "10"
 	SashUserAgent  = "Qoder"
-	// OpenAPICosyVersion 是 openapi 一族用的协议版本（低于推理网关）。
-	OpenAPICosyVersion = "1.0.1"
-	// MaxOutputTokens 是单次输出上限；超过约 32K 上游行为会退化。
-	MaxOutputTokens = 32768
+	// OpenAPICosyVersion 是 openapi 一族用的协议版本。
+	// 实测与推理网关同版本（1.1.69），不再是旧的 1.0.1。
+	OpenAPICosyVersion = "1.1.69"
+	// MaxOutputTokens 是单次输出上限；实测客户端发的是 32000，
+	// 超过约 32K 上游行为会退化。
+	MaxOutputTokens = 32000
 	// DefaultContextWindow 模型条目缺 max_input_tokens 时的兜底。
 	DefaultContextWindow = 200_000
 )

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -27,13 +28,21 @@ import (
 
 const (
 	// GatewayVersion 是推理网关使用的 COSY 协议版本。
-	GatewayVersion = "1.1.38"
-	// ClientType 沿用 CLI 形态。
-	ClientType = "5"
-	// DataPolicy 表示不同意把数据用于训练。
+	// 实测（Qoder 0.4.8 抓包）：1.1.69。
+	GatewayVersion = "1.1.69"
+	// ClientType 是 COSY 客户端类型；实测推理/queue/model list 全为 10。
+	ClientType = "10"
+	// DataPolicy 表示不同意把数据用于训练（chat 前客户端会读
+	// config/getDataPolicy，用户同意后为 agree）。
 	DataPolicy = "disagree"
 	// LoginVersion 是登录版本标识。
 	LoginVersion = "v2"
+
+	// BusinessProduct / BusinessType / Scene 是推理网关校验的业务头，
+	// 实测 chat 请求三者同时出现，缺任意一个都会被拒。
+	BusinessProduct = "app"
+	BusinessType    = "agent"
+	Scene           = "app"
 
 	machineType = "5"
 )
@@ -85,6 +94,39 @@ func EncodeBody(payload []byte) []byte {
 		out = append(out, table[standard[i]])
 	}
 	return out
+}
+
+// DecodeBody 是 EncodeBody 的逆变换：端点表
+// （/algo/api/v5/service/region/endpoints）即使在没标 Encode 的情况下
+// 也返回编码后的正文，必须先解码再当 JSON 读。
+func DecodeBody(encoded []byte) ([]byte, error) {
+	length := len(encoded)
+	if length == 0 || length%4 != 0 {
+		return nil, fmt.Errorf("COSY 正文长度不是 4 的倍数")
+	}
+	third := length / 3
+
+	// 编码时的顺序：尾段 (last third) + 中段 + 首段。
+	std := make([]byte, length)
+	copy(std[length-third:], encoded[:third])
+	copy(std[third:length-third], encoded[third:length-third])
+	copy(std[:third], encoded[length-third:])
+
+	rev := make(map[byte]byte, 65)
+	for i, ch := range stdAlphabet {
+		rev[customAlphabet[i]] = ch
+	}
+	rev['$'] = '='
+	for i, b := range std {
+		if mapped, ok := rev[b]; ok {
+			std[i] = mapped
+		}
+	}
+	out, err := base64.StdEncoding.DecodeString(string(std))
+	if err != nil {
+		return nil, fmt.Errorf("COSY 正文 base64 解码失败")
+	}
+	return out, nil
 }
 
 // BuildAuthHeaders 构造一次请求所需的全部 COSY 头。body 必须是**已编码**的
@@ -141,7 +183,12 @@ func BuildAuthHeaders(body []byte, rawURL string, id Identity) (map[string]strin
 		"Cosy-Machinetype":       machineType,
 		"Cosy-Machineos":         MachineOS(),
 		"Cosy-Clienttype":        ClientType,
-		"Cosy-Clientip":          "127.0.0.1",
+		// 实测 Cosy-ClientIp 装的是设备指纹 uuid，不是回环地址。
+		"Cosy-Clientip":          id.MachineID,
+		"Cosy-Business-Product":  BusinessProduct,
+		"Cosy-Business-Type":     BusinessType,
+		"Cosy-Scene":             Scene,
+		"Cosy-Machinehostname":   machineHostname(),
 		"Cosy-Bodyhash":          bodyHash,
 		"Cosy-Bodylength":        fmt.Sprintf("%d", len(body)),
 		"Cosy-Sigpath":           sigPath,
@@ -194,6 +241,15 @@ func SignaturePath(rawURL string) (string, error) {
 		return strings.TrimPrefix(path, "/algo"), nil
 	}
 	return path, nil
+}
+
+// machineHostname 返回主机名（实测 chat 请求会带 Cosy-MachineHostname）。
+func machineHostname() string {
+	name, err := os.Hostname()
+	if err != nil || name == "" {
+		return "unknown"
+	}
+	return name
 }
 
 // MachineOS 返回 {arch}_{os} 形态的机器标识，arch 用 Qoder 的命名。
