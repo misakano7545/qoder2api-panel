@@ -34,13 +34,13 @@ func ifCN(realm string) bool {
 
 // 上游路径（openapi 主机一族）。
 const (
-	DeviceLoginPath   = "/device/selectAccounts"
-	DevicePollPath    = "/api/v1/deviceToken/poll"
-	ExchangePath      = "/api/v1/jobToken/exchange"
+	DeviceLoginPath = "/device/selectAccounts"
+	DevicePollPath  = "/api/v1/deviceToken/poll"
+	ExchangePath    = "/api/v1/jobToken/exchange"
 	// JobTokenPath 是「设备令牌换作业令牌」的入口（实测两区都有）。
 	// POST body: {"clientId":"<QoderClientID>"}，Authorization: Bearer dt-…
 	// 返回的 jt- 令牌才是后续 openapi 的凭证。
-	JobTokenPath = "/api/v1/me/jobToken"
+	JobTokenPath      = "/api/v1/me/jobToken"
 	UserInfoPath      = "/api/v1/userinfo"
 	UsagePath         = "/api/v2/quota/usage"
 	PlanPath          = "/api/v2/user/plan"
@@ -81,6 +81,7 @@ const (
 // 默认主机基址。配置可覆盖（面板 upstream 段），这里只是兜底。
 const (
 	AgentHost     = "https://api3.qoder.sh/" // 国际版推理网关（region/inferNodes）
+	API3Global    = "https://api3.qoder.sh/"
 	AgentHostIntl = "https://api3.qoder.sh/" // 兼容旧配置键：国际版推理网关
 	GatewayCN     = "https://gateway.qoder.com.cn/"
 	// 实测 host 角色（/algo/api/v5/service/region/endpoints 返回）：
@@ -93,6 +94,7 @@ const (
 	//   nesNodes      api5.qoder.com.cn —— 仅国内版
 	//   fastMode      api6.qoder.com.cn —— 仅国内版
 	CenterGlobal  = "https://center.qoder.sh/"
+	API1Global    = "https://api1.qoder.sh/"
 	API2Global    = "https://api2.qoder.sh/"
 	API5CN        = "https://api5.qoder.com.cn/"
 	API6CN        = "https://api6.qoder.com.cn/"
@@ -175,6 +177,42 @@ func SashHeaders(token string) map[string]string {
 // joinURL 拼接基址与路径：接受「带/不带结尾斜杠」的基址（配置项里两种写法都有人写）。
 func joinURL(base, path string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
+}
+
+// chatBases 返回推理网关的候选基址（按优先级）：排队/容量窗口是**按端点**发生的，
+// 换一个端点常常就排得上，而签名覆盖的是路径不是 host，所以同一份头可以复用。
+func (c *Client) chatBases(realm, token string) []string {
+	primary := c.inferenceBase(realm, token)
+	if ifCN(realm) {
+		return []string{primary}
+	}
+	// 只在内置端点之间互备：网关基址被显式钉到自定义 host（自建/桩）时尊重它，不擅自外跳。
+	known := false
+	for _, host := range []string{API1Global, API3Global, API2Global} {
+		if strings.TrimRight(host, "/") == strings.TrimRight(primary, "/") {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return []string{primary}
+	}
+	out := []string{primary}
+	for _, alt := range []string{API1Global, API3Global, API2Global} {
+		if strings.TrimRight(alt, "/") != strings.TrimRight(primary, "/") && !containsStr(out, strings.TrimRight(alt, "/")) {
+			out = append(out, strings.TrimRight(alt, "/"))
+		}
+	}
+	return out
+}
+
+func containsStr(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ChatURL 拼出推理请求的完整地址。

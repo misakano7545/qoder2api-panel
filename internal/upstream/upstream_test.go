@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -347,5 +348,84 @@ func TestExchangePAT(t *testing.T) {
 	}
 	if a.JWT() != "jt-new" {
 		t.Errorf("token = %q", a.JWT())
+	}
+}
+
+// 排队时换端点：主端点 403 + 10605，备用端点必须被真的试到。
+func TestChatStreamFailsOverEndpoint(t *testing.T) {
+	var primaryHit, altHit bool
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHit = true
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"code":"10605","message":"{\"isQueued\":true,\"serviceAvailable\":false}"}`)
+	}))
+	defer primary.Close()
+	alt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		altHit = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(map[string]any{"id": "c1", "model": "Auto",
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "备用端点"}}}})
+		env, _ := json.Marshal(map[string]any{"statusCodeValue": 200, "body": string(chunk)})
+		_, _ = io.WriteString(w, "data: "+string(env)+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer alt.Close()
+
+	c := New()
+	c.SetAgentHosts(primary.URL, primary.URL)
+	// 用 chatBasesOverride 之外的方式注入候选：直接把候选端点写成两个 httptest。
+	c.chatBasesOverride = []string{primary.URL, alt.URL}
+	rc, status, _, err := c.ChatStream(testAccount(), []byte(`{"model":"Auto","messages":[]}`))
+	if err != nil || status != 200 {
+		t.Fatalf("备用端点应接住请求：status=%d err=%v", status, err)
+	}
+	defer rc.Close()
+	if !primaryHit || !altHit {
+		t.Errorf("两个端点都应被调用：primary=%v alt=%v", primaryHit, altHit)
+	}
+}
+
+// 200 信封承载排队：也必须被识别成排队（而不是当成功），端点才有得换。
+func TestEnvelopeQueueDetectedAtPeek(t *testing.T) {
+	inner := `{"code":"10605","message":"{\"isQueued\":true,\"retryAfterSeconds\":7,\"serviceAvailable\":false}"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		env, _ := json.Marshal(map[string]any{"statusCodeValue": 403, "body": inner})
+		_, _ = io.WriteString(w, "data: "+string(env)+"\n\n")
+	}))
+	defer srv.Close()
+	c := New()
+	c.SetAgentHosts(srv.URL, srv.URL)
+	_, status, _, err := c.ChatStream(testAccount(), []byte(`{"model":"Auto","messages":[]}`))
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != ErrBusy {
+		t.Fatalf("应判成排队，得到 status=%d err=%v", status, err)
+	}
+	if ue.RetryAfterSecs != 7 || !ue.ServiceUnavailable {
+		t.Errorf("建议间隔/可用性没解析出来：%+v", ue)
+	}
+}
+
+// 正常流不能被窥帧吃掉：首帧仍要出现在返回的流里。
+func TestPeekKeepsFirstFrame(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(map[string]any{"id": "c1", "model": "Auto",
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "首帧正文"}}}})
+		env, _ := json.Marshal(map[string]any{"statusCodeValue": 200, "body": string(chunk)})
+		_, _ = io.WriteString(w, "data: "+string(env)+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	c := New()
+	c.SetAgentHosts(srv.URL, srv.URL)
+	rc, _, _, err := c.ChatStream(testAccount(), []byte(`{"model":"Auto","messages":[]}`))
+	if err != nil {
+		t.Fatalf("正常流不应报错：%v", err)
+	}
+	defer rc.Close()
+	out, _ := io.ReadAll(rc)
+	if !strings.Contains(string(out), "首帧正文") {
+		t.Fatalf("首帧被窥帧吃掉了：%s", string(out))
 	}
 }

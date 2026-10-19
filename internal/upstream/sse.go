@@ -53,6 +53,8 @@ type sseEvent struct {
 	RetryAfterSecs int64
 	// ServiceUnavailable = serviceAvailable:false。
 	ServiceUnavailable bool
+	// replay 是这条帧的原始字节（peekFirstFrame 用，好把已读部分放回流里）。
+	replay []byte
 }
 
 // lineBuffer 按字节缓冲 SSE 行：只在完整行上解码，避免把多字节字符切坏。
@@ -489,6 +491,7 @@ func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError
 	}
 
 	acc := newAccumulator()
+	guard := &reasoningGuard{}
 	roleSent := false
 	frame := func(d map[string]any, finish string) map[string]any {
 		choice := map[string]any{"index": 0, "delta": d}
@@ -537,7 +540,28 @@ func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError
 		case sseDone:
 			return true, nil
 		case sseChunk:
-			for _, d := range acc.add(event.Chunk) {
+			deltas := acc.add(event.Chunk)
+			for _, d := range deltas {
+				if d.kind != deltaReasoning {
+					continue
+				}
+				hit := guard.Push(d.text)
+				if hit == nil {
+					continue
+				}
+				// 思考链机械复读：模型侧问题，不罚号（onErr 走 ErrReasoningLoop 的空分支），
+				// 但要把这段流掐掉——否则客户端会一直等一段永远重复的思考。
+				se := &StreamError{KindValue: ErrReasoningLoop, Status: 502,
+					Msg: "思考链复读（" + hit.Kind + "：" + hit.Detail + "），已中断本次生成"}
+				if onErr != nil {
+					onErr(se)
+				}
+				_ = write(map[string]any{"error": map[string]any{
+					"message": se.Msg, "type": "proxy_error", "code": "upstream_reasoning_loop"}})
+				_ = writeRaw("data: [DONE]\n\n")
+				return true, nil // 已收尾，不再继续读上游
+			}
+			for _, d := range deltas {
 				payload := map[string]any{}
 				switch d.kind {
 				case deltaReasoning:

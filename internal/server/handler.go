@@ -628,6 +628,9 @@ func (h *Handler) noteFailure(uid string, kind upstream.ErrKind) {
 	case upstream.ErrBusy:
 		// 排队/资源受限是模型侧的窗口，与账号健康无关：罚号只会把好号推向熔断。
 		// no-op
+	case upstream.ErrReasoningLoop:
+		// 思考链复读是模型侧问题，换号也未必更好；不罚号，客户端自己决定要不要重试。
+		// no-op
 	default:
 		h.cfg.Pool.NoteDegrade(uid)
 	}

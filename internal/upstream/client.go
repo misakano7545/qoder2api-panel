@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -22,14 +24,15 @@ import (
 type ErrKind int
 
 const (
-	ErrNone        ErrKind = iota // 与账号无关（模型/参数/业务码）
-	ErrPlanLimit                  // 额度不足/套餐不支持 → 计划硬冷却
-	ErrSoftRate                   // 限流 → 软冷却
-	ErrSessionDead                // 登录态失效 → 连续达阈值才禁用
-	ErrNotFound                   // 404 → 短冷却
-	ErrServer                     // 5xx → 熔断计数
-	ErrClient                     // 其余 4xx → 降权（本仓按「不罚号」处理）
-	ErrBusy                       // 上游排队 → 换号不罚号
+	ErrNone          ErrKind = iota // 与账号无关（模型/参数/业务码）
+	ErrPlanLimit                    // 额度不足/套餐不支持 → 计划硬冷却
+	ErrSoftRate                     // 限流 → 软冷却
+	ErrSessionDead                  // 登录态失效 → 连续达阈值才禁用
+	ErrNotFound                     // 404 → 短冷却
+	ErrServer                       // 5xx → 熔断计数
+	ErrClient                       // 其余 4xx → 降权（本仓按「不罚号」处理）
+	ErrBusy                         // 上游排队 → 换号不罚号
+	ErrReasoningLoop                // 思考链复读（模型侧问题）→ 中断且不罚号
 )
 
 // String 供日志与面板展示。
@@ -49,6 +52,8 @@ func (k ErrKind) String() string {
 		return "client"
 	case ErrBusy:
 		return "busy"
+	case ErrReasoningLoop:
+		return "reasoning_loop"
 	default:
 		return "none"
 	}
@@ -149,6 +154,9 @@ type Client struct {
 
 	flightMu sync.Mutex
 	flights  map[string]*refreshFlight
+
+	// chatBasesOverride 测试注入点：非空时用这组端点替换默认候选。
+	chatBasesOverride []string
 }
 
 // New 生产默认值：连接池共享，短请求 120s 兜底、长流只看首字节超时。
@@ -518,7 +526,33 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		}
 		return nil, 502, nil, &Error{Kind: ErrServer, Status: 502, Msg: err.Error()}
 	}
-	req, err := http.NewRequest(http.MethodPost, plan.url, bytes.NewReader(plan.body))
+	candidates := plan.urls
+	if len(candidates) == 0 {
+		candidates = []string{plan.url}
+	}
+	var (
+		lastStatus int
+		lastBody   []byte
+		lastErr    error
+	)
+	for i, base := range candidates {
+		rc, status, raw, err := c.doChat(base, plan)
+		if err == nil {
+			return rc, status, raw, nil
+		}
+		lastStatus, lastBody, lastErr = status, raw, err
+		// 只有「排队/容量窗口」和传输层失败才换端点：额度不足、凭证失效换端点也没用。
+		if i == len(candidates)-1 || !endpointRetryable(err) {
+			break
+		}
+		log.Printf("端点 %s 排队/不可达（%v），换下一个候选端点重发", base, err)
+	}
+	return nil, lastStatus, lastBody, lastErr
+}
+
+// doChat 向一个端点发一次已签名的推理请求。
+func (c *Client) doChat(base string, plan *chatPlan) (io.ReadCloser, int, []byte, error) {
+	req, err := http.NewRequest(http.MethodPost, ChatURL(base), bytes.NewReader(plan.body))
 	if err != nil {
 		return nil, 500, nil, &Error{Kind: ErrServer, Status: 500, Msg: "构造 Qoder 上游请求失败"}
 	}
@@ -556,12 +590,58 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, resp.StatusCode, raw, &Error{Kind: kind, Status: resp.StatusCode, Msg: msg,
 			RetryAfterSecs: retryAfterOf(string(raw)), ServiceUnavailable: queueUnavailable(string(raw))}
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+
+	// 排队还有第二种形态：HTTP 200，但流里第一帧就是 statusCodeValue=403 的信封。
+	// 只看状态码会把它当成功，端点也就没法换——所以在这里窥一帧。
+	br := bufio.NewReaderSize(resp.Body, 64*1024)
+	first, err := peekFirstFrame(br)
+	if err != nil {
+		_ = resp.Body.Close()
+		return nil, 502, nil, &Error{Kind: ErrServer, Status: 502, Msg: "读取上游首帧失败"}
+	}
+	if first.Kind == sseError {
+		_ = resp.Body.Close()
+		kind := first.Class
+		if kind != ErrBusy && kind != ErrPlanLimit && kind != ErrSoftRate {
+			kind = Classify(first.Status, first.Raw)
+		}
+		return nil, first.Status, []byte(first.Raw), &Error{Kind: kind, Status: first.Status,
+			Msg: orDefault(first.Message, first.Raw), RetryAfterSecs: first.RetryAfterSecs,
+			ServiceUnavailable: first.ServiceUnavailable}
+	}
+	return &peekedBody{Reader: io.MultiReader(bytes.NewReader(first.replay), br), Closer: resp.Body}, resp.StatusCode, nil, nil
+}
+
+// peekedBody 把「已经读掉的首帧」拼回流的开头。
+type peekedBody struct {
+	io.Reader
+	io.Closer
+}
+
+// peekFirstFrame 读到第一条 data: 帧为止（最多 8 行 / 64KB），把它解析成事件，
+// 同时记住原始字节以便回放——不能丢帧，否则客户端会少一段正文。
+func peekFirstFrame(br *bufio.Reader) (sseEvent, error) {
+	var replay bytes.Buffer
+	for i := 0; i < 8; i++ {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			replay.Write(line)
+			if ev := parseSSELine(strings.TrimPrefix(strings.TrimRight(string(line), "\r\n"), "data:")); ev.Kind != sseSkip {
+				ev.replay = replay.Bytes()
+				return ev, nil
+			}
+		}
+		if err != nil {
+			return sseEvent{Kind: sseSkip, replay: replay.Bytes()}, nil
+		}
+	}
+	return sseEvent{Kind: sseSkip, replay: replay.Bytes()}, nil
 }
 
 // chatPlan 是一次已签名的出站请求。
 type chatPlan struct {
-	url     string
+	url     string   // 主端点（签名用它的路径，各候选路径相同）
+	urls    []string // 候选端点，排队时依次换
 	headers map[string]string
 	body    []byte
 	model   ModelInfo
@@ -591,7 +671,21 @@ func (c *Client) buildChatPlan(a *auth.Auth, body []byte) (*chatPlan, error) {
 	if err != nil {
 		return nil, &Error{Kind: ErrServer, Status: 500, Msg: err.Error()}
 	}
-	return &chatPlan{url: url, headers: headers, body: encoded, model: model}, nil
+	bases := c.chatBases(a.Realm(), a.JWT())
+	if len(c.chatBasesOverride) > 0 {
+		bases = c.chatBasesOverride
+	}
+	return &chatPlan{url: url, urls: bases, headers: headers, body: encoded, model: model}, nil
+}
+
+// endpointRetryable 判断这次失败该不该换端点重发：排队/服务不可用/连不上都值得换，
+// 额度与凭证问题换了也一样。
+func endpointRetryable(err error) bool {
+	var ue *Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Kind == ErrBusy || ue.Kind == ErrServer
 }
 
 // retryAfterSecsRE 抓上游建议的重试间隔。正文是三层嵌套的 JSON 字符串
