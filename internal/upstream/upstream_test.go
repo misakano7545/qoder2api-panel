@@ -203,6 +203,8 @@ func TestClassify(t *testing.T) {
 		{401, "", ErrSessionDead},
 		{429, "", ErrSoftRate},
 		{503, "", ErrServer},
+		{502, "", ErrGateway},
+		{504, "", ErrGateway},
 		{404, "", ErrNotFound},
 		{400, `{"code":"110"}`, ErrPlanLimit},
 		{400, `{"code":"10605"}`, ErrBusy},

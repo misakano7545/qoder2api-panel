@@ -33,6 +33,7 @@ const (
 	ErrClient                       // 其余 4xx → 降权（本仓按「不罚号」处理）
 	ErrBusy                         // 上游排队 → 换号不罚号
 	ErrReasoningLoop                // 思考链复读（模型侧问题）→ 中断且不罚号
+	ErrGateway                      // 502/504 网关超时（请求太大/上游排队超时）→ 不罚号、不换号
 )
 
 // String 供日志与面板展示。
@@ -54,6 +55,8 @@ func (k ErrKind) String() string {
 		return "busy"
 	case ErrReasoningLoop:
 		return "reasoning_loop"
+	case ErrGateway:
+		return "gateway"
 	default:
 		return "none"
 	}
@@ -102,6 +105,10 @@ func Classify(status int, body string) ErrKind {
 		return ErrSessionDead
 	case status == http.StatusTooManyRequests:
 		return ErrSoftRate
+	case status == http.StatusBadGateway || status == http.StatusGatewayTimeout:
+		// 502/504 是网关/上游自己超时（实测 1M token 请求 150s 后 504）：账号没问题，
+		// 重发同一份巨体也没意义，交给调用方如实回错。
+		return ErrGateway
 	case status >= 500:
 		return ErrServer
 	case status == http.StatusNotFound:

@@ -403,7 +403,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 调用方参数错（4xx，与账号无关，同 4001/4011 那一类）：如实回上游状态码，
 			// 不再换号——换号只会把每个号都罚一次降权，最后还谎报成「号都不可用」。
 			var ue *upstream.Error
-			if errors.As(err, &ue) && (ue.Kind == upstream.ErrClient || ue.Kind == upstream.ErrNone) {
+			if errors.As(err, &ue) && (ue.Kind == upstream.ErrClient || ue.Kind == upstream.ErrNone || ue.Kind == upstream.ErrGateway) {
 				writeOpenAIError(w, ue.Status, "upstream_rejected", ue.Msg)
 				return
 			}
@@ -630,6 +630,9 @@ func (h *Handler) noteFailure(uid string, kind upstream.ErrKind) {
 		h.cfg.Pool.NoteError(uid)
 	case upstream.ErrBusy:
 		// 排队/资源受限是模型侧的窗口，与账号健康无关：罚号只会把好号推向熔断。
+		// no-op
+	case upstream.ErrGateway:
+		// 网关超时/请求过大：与账号健康无关，换号只会把每个号都罚一遍还白重发巨体。
 		// no-op
 	case upstream.ErrReasoningLoop:
 		// 思考链复读是模型侧问题，换号也未必更好；不罚号，客户端自己决定要不要重试。
