@@ -535,8 +535,15 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 	attemptStart := time.Now()
 	rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
 	if terr != nil {
+		// 出站失败也要分类：排队/额度不是账号故障，无脑 NoteError 会把好号推进熔断
+		// （实测：上游一整天 p3 排队，账号被自己的排队记成 breaker）。
 		h.noteUsage(acct.UID, peek.Model, attemptStart, false, nil, tr)
-		h.cfg.Pool.NoteError(acct.UID)
+		kind := upstream.ErrServer
+		var ue *upstream.Error
+		if errors.As(terr, &ue) {
+			kind = ue.Kind
+		}
+		h.noteFailure(acct.UID, kind)
 		return false, terr
 	}
 	if status >= 400 {
