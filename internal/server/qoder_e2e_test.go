@@ -295,13 +295,16 @@ func TestModelsList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
-	found := false
+	foundCN, foundGlobal := false, false
 	for _, m := range resp.Data {
-		if m.ID == "Qwen3.8-Max" {
-			found = true
+		switch m.ID {
+		case "cn:Qwen3.8-Max":
+			foundCN = true
+		case "global:Qwen3.8-Max":
+			foundGlobal = true
 		}
 	}
-	if !found {
-		t.Errorf("模型列表缺少 Qwen3.8-Max: %s", rec.Body.String())
+	if !foundCN || !foundGlobal {
+		t.Errorf("模型列表应把两个地区分开列出（cn=%v global=%v）: %s", foundCN, foundGlobal, rec.Body.String())
 	}
 }

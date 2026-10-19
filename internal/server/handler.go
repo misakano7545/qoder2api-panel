@@ -222,18 +222,14 @@ func (h *Handler) modelRealm(model string) string {
 	return ""
 }
 
-// modelList 是 /v1/models 的内容：官方目录（两区并集，按 id 去重）。
-// 同名模型两区都有时只留一条：出站走哪台网关由账号地区决定，客户端不必关心。
+// modelList 是 /v1/models 的内容：官方目录两区各自成条，id 带 `realm:` 前缀。
+// 同名模型两区下发的 id 字符串一模一样，不前缀就只能留一条；前缀即 resolve_model.go
+// 里的路由协议，客户端挑哪个地区就发哪个前缀，裸名仍按账号地区兜底。
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0, 32)
-	seen := map[string]bool{}
 	for _, mi := range h.cfg.Upstream.Catalog() {
-		if seen[mi.ID] {
-			continue
-		}
-		seen[mi.ID] = true
 		out = append(out, map[string]any{
-			"id":                mi.ID,
+			"id":                mi.Realm + ":" + mi.ID,
 			"object":            "model",
 			"created":           1753600000,
 			"owned_by":          "qoder-" + mi.Realm,
