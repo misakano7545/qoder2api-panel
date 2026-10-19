@@ -55,13 +55,13 @@ docker compose up -d          # 镜像内二进制 /app/q2api，数据在 ./auth
 ## 用法
 
 1. 面板 → **账号** → **添加账号**
-   - 浏览器登录：选地区 → 「打开」在新标签页完成 Qoder 授权 → 回面板点「我已授权」
+   - 浏览器登录：选地区（国际版 / 国内版）→ 「打开」在新标签页完成 Qoder 授权 → 面板每 3 秒自动收号
    - refreshToken / PAT：另一页签直接粘（`pt-` 开头按 PAT 兑换，其余按刷新令牌续期）
 2. **模型**页确认目录已拉到官方清单（拉不到会显示静态兜底并留日志）
-3. 客户端指向 `http://<host>:7864/v1`，`Authorization: Bearer <api_key>`：
+3. 客户端指向 `http://<host>:7866/v1`，`Authorization: Bearer <api_key>`：
 
 ```bash
-curl http://127.0.0.1:7864/v1/chat/completions \
+curl http://127.0.0.1:7866/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d '{"model":"Qwen3.8-Max","stream":true,
        "messages":[{"role":"user","content":"用 Go 写个快排"}]}'
@@ -69,6 +69,9 @@ curl http://127.0.0.1:7864/v1/chat/completions \
 
 模型名接受官方显示名、小写写法与上游 key（`Qwen3.8-Max` / `qwen3.8-max` / `qmodel_38max`）；
 未知模型直接 400，不做猜测。
+
+地区用前缀指定：`cn:Auto`（国内版）/ `global:Auto`（国际版）；不带前缀按目录归属走，
+某个地区没有可用账号时会落到另一个地区。
 
 ## 端点
 
@@ -113,7 +116,7 @@ login/* / accounts/* / checkin / balance / keepalive）。空 `api_key` 时只�
 
 ## 已知限制
 
-- **国际版签到**需要设备风控身份（UMID 那一套）。本仓未移植：国际号会拿到空活动列表并
+- **国内版签到**需要设备风控身份（UMID 那一套）。本仓未移植：国内号会拿到空活动列表并
   按「今日无活动」跳过，不会伪装成功。
 - **积分单价不内置**：Qoder 没有稳定可引用的积分价目，面板「积分≈」显示 `—`，不做估算
   （同名模型多，错配单价会静默给出错误金额）。
