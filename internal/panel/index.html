@@ -1126,8 +1126,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button class="xs" id="btnCopyUrl" hidden>复制</button>
             <button class="xs" id="btnOpenUrl" hidden>打开</button>
           </div>
-          <label class="fld" hidden><input id="callback" spellcheck="false" autocomplete="off"></label>
-          <div class="hint">在浏览器里完成 Qoder 授权后，回面板点下面的「我已授权」——服务端会自己轮询结果，不需要粘贴回调地址。</div>
+            <div class="hint">在浏览器里完成 Qoder 授权，面板会自动收号（每 3 秒查一次），不需要回面板点任何按钮。</div>
         </div>
       </div>
       <div id="addTabToken" class="tab-panel" hidden>
@@ -1141,7 +1140,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="grow"></span>
       <button id="btnAddClose">关闭</button>
-      <button id="btnAddFinish" class="primary" hidden>我已授权</button>
       <button id="btnRefreshLogin" class="primary" hidden>用 refreshToken 加入</button>
     </footer>
   </div>

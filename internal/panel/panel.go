@@ -88,7 +88,7 @@ func New(cfg Config) *Panel {
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
-	p.mux.HandleFunc("POST /panel/api/login/finish", p.withAuth(p.loginFinish))
+	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	// refreshToken 直登：不经过浏览器把号加进来（授权页只认浏览器本机的 127.0.0.1 回调，
 	// 公网回跳实测被拒，见 login.go 顶部——所以这条路是唯一的免粘贴方案）。
 	p.mux.HandleFunc("POST /panel/api/login/refresh", p.withAuth(p.loginRefresh))

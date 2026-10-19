@@ -18,10 +18,6 @@ import (
 
 const (
 	loginTTL = 15 * time.Minute
-	// finishPollBudget 是「完成」按钮等待浏览器授权的最长时间：面板在这段时间里
-	// 每 2 秒轮询一次上游，用户授权完不用再回面板点第二次。
-	finishPollBudget = 100 * time.Second
-	finishPollGap    = 2 * time.Second
 )
 
 var errLoginSession = errors.New("登录链接已失效，请回面板重新点「添加账号」")
@@ -32,6 +28,8 @@ type loginSession struct {
 	Realm   string
 	Login   *upstream.DeviceLogin
 	At      time.Time
+	// Busy 上一次 poll 还没回来：前端 3s 一次比上游慢时会重叠，重叠会并发打同一个 nonce。
+	Busy bool
 }
 
 func randHex(n int) (string, error) {
@@ -94,51 +92,60 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// loginFinish 等浏览器授权完成并落盘入池。Qoder 设备流没有回调可粘贴，
-// 所以这里在预算内自己轮询；用户还没授权就返回 409 让他稍后再点。
-func (p *Panel) loginFinish(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID       string `json:"id"`
-		Callback string `json:"callback"`
-	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req)
+// loginPoll 查一次授权结果：未完成 → {done:false}（前端每 3s 再问）；
+// 会话不存在/过期 → 410（前端停止轮询）；完成 → 落盘入池并回 {done:true}。
+//
+// 做成「一次一查」而不是服务端长等：Qoder 设备流没有回调，verifier 又只能在服务端，
+// 所以必须有人轮询——让浏览器按固定节拍问，用户什么时候授权完都在下一次问到时收号，
+// 不需要再点一次「我已授权」。
+func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
 	p.loginMu.Lock()
-	sess, ok := p.logins[req.ID]
+	sess, ok := p.logins[id]
+	if ok && sess.Busy {
+		// 上一次查询还没回来（上游慢）：本轮直接说「没完成」，避免并发打同一个 nonce。
+		p.loginMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"done": false})
+		return
+	}
+	if ok {
+		sess.Busy = true
+		p.logins[id] = sess
+	}
 	p.loginMu.Unlock()
 	if !ok || time.Since(sess.At) > loginTTL {
 		writeErr(w, http.StatusGone, errLoginSession.Error())
 		return
 	}
+	// 失败路径复位闸门，供下一次轮询继续（成功路径已 delete 掉会话）。
+	defer func() {
+		p.loginMu.Lock()
+		if s, still := p.logins[id]; still {
+			s.Busy = false
+			p.logins[id] = s
+		}
+		p.loginMu.Unlock()
+	}()
 
-	deadline := time.Now().Add(finishPollBudget)
-	for {
-		creds, done, err := sess.Login.Poll(r.Context())
-		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		if done {
-			uid, nick, err := p.saveAccount(creds)
-			if err != nil {
-				writeErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			p.loginMu.Lock()
-			delete(p.logins, req.ID)
-			p.loginMu.Unlock()
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "nickname": nick})
-			return
-		}
-		if time.Now().After(deadline) {
-			writeErr(w, http.StatusConflict, "还没检测到浏览器里的授权，请完成授权后再点「完成」")
-			return
-		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(finishPollGap):
-		}
+	creds, done, err := sess.Login.Poll(r.Context())
+	if err != nil {
+		// 5xx/超时交给前端继续重试：授权可能已在浏览器侧完成，停掉就永远不入池。
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
 	}
+	if !done {
+		writeJSON(w, http.StatusOK, map[string]any{"done": false})
+		return
+	}
+	uid, nick, err := p.saveAccount(creds)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	p.loginMu.Lock()
+	delete(p.logins, id)
+	p.loginMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"done": true, "ok": true, "uid": uid, "nickname": nick})
 }
 
 // saveAccount 把一个已确认的凭证落盘并入池（同一 uid 直接覆盖旧文件）。

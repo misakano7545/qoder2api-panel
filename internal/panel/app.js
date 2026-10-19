@@ -23,7 +23,7 @@ function clearKey() {
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let cfgLoaded = null;
-let logPin = true, logCh = 'all', loginID = '', refTimer = null;
+let logPin = true, logCh = 'all', loginID = '', loginTimer = null, pollFails = 0, refTimer = null;
 let usageHours = 72;                   // 账号池用量列窗口，由 overview 的 usage_hours 同步
 let ready = false;                       // 认证探测通过后才允许拉数据，避免把 401 当加载失败刷 toast
 
@@ -1625,7 +1625,7 @@ async function loadPackages() {
 /* ── 添加账号（不轮询：贴回调地址换票）────────────────────────────── */
 // 地区：链接按地区切域（国内 www.trae.cn / 国际 www.trae.ai）。回调自带 OAuth host，
 // 所以换票那步不用再选一次——面板按 host 自动落 domain/apiHost。
-let addRealm = 'cn';
+let addRealm = 'intl'; // 与弹窗里默认勾选的单选一致（Qoder 国际号更常见）
 let addTab = 'browser';
 
 // switchAddTab 主按钮跟着 tab 走：一屏只有一个「加入」，避免两个并列主 CTA 抢焦点。
@@ -1633,12 +1633,12 @@ function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabBrowser').hidden = tab !== 'browser';
   $('addTabToken').hidden = tab !== 'token';
-  $('btnAddFinish').hidden = tab !== 'browser' || !loginID;
   $('btnRefreshLogin').hidden = tab !== 'token';
 }
 
 function openAdd() {
   loginID = '';
+  stopLoginPoll();
   addTab = 'browser';
   switchAddTab(addTab);
   $('addLoad').hidden = false;
@@ -1646,7 +1646,6 @@ function openAdd() {
   $('addErr').hidden = true;
   $('btnCopyUrl').hidden = true;
   $('btnOpenUrl').hidden = true;
-  $('callback').value = '';
   $('addRefreshToken').value = '';
   $('addVeil').classList.add('on');
   api('login/start', { method: 'POST', body: JSON.stringify({ realm: addRealm }) }).then(d => {
@@ -1657,7 +1656,10 @@ function openAdd() {
     $('addReady').hidden = false;
     $('btnCopyUrl').hidden = false;
     $('btnOpenUrl').hidden = false;
-    switchAddTab(addTab); // loginID 到手，主按钮按 tab 放出来
+    switchAddTab(addTab);
+    // 授权页一打开就开始问：用户在任何时候完成授权，下一次轮询就收号（不用再点按钮）。
+    pollFails = 0;
+    loginTimer = setInterval(pollLogin, 3000);
   }).catch(e => {
     $('addLoad').hidden = true;
     $('addErr').hidden = false;
@@ -1682,22 +1684,39 @@ async function refreshLogin() {
   } finally { btn.disabled = false; }
 }
 
-async function finishAdd() {
-  const btn = $('btnAddFinish');
-  btn.disabled = true;
+function stopLoginPoll() { if (loginTimer) { clearInterval(loginTimer); loginTimer = null; } }
+
+// pollLogin 每 3s 问一次授权结果。连续失败不立刻放弃：OAuth 可能已在浏览器侧完成，
+// 停掉轮询账号就永远不入池。
+const POLL_MAX_FAILS = 20;
+async function pollLogin() {
+  if (!loginID) return;
   try {
-    const d = await api('login/finish', {
-      method: 'POST',
-      body: JSON.stringify({ id: loginID, callback: $('callback').value }),
-    });
-    // 加完立刻关弹窗：成功提示交给 toast（弹窗关了也看得见），省一次「关闭」点击。
+    const d = await api('login/poll?id=' + encodeURIComponent(loginID));
+    pollFails = 0;
+    if (!d.done) return;
+    stopLoginPoll();
     toast('已加入：' + (d.nickname || d.uid), 'ok');
     $('addVeil').classList.remove('on');
+    loginID = '';
     loadOverview(true);
   } catch (e) {
+    if (e.status === 404 || e.status === 410) {
+      stopLoginPoll();
+      $('addErr').hidden = false;
+      $('addErr').textContent = '登录会话已过期，请关闭后重新添加';
+      return;
+    }
+    if (++pollFails >= POLL_MAX_FAILS) {
+      stopLoginPoll();
+      $('addErr').hidden = false;
+      $('addErr').textContent = '连续 ' + POLL_MAX_FAILS + ' 次查询失败，已停止轮询：' + e.message +
+        '（授权可能已完成，可关闭后重新添加）';
+      return;
+    }
     $('addErr').hidden = false;
-    $('addErr').textContent = e.message;
-  } finally { btn.disabled = false; }
+    $('addErr').textContent = '网络中断，自动重试中（' + pollFails + '/' + POLL_MAX_FAILS + '）：' + e.message;
+  }
 }
 
 /* ── 启动 ─────────────────────────────────────────────────────────── */
@@ -1744,15 +1763,13 @@ function boot() {
   document.querySelectorAll('#addVeil input[name="addRealm"]').forEach(r => {
     r.onchange = () => { addRealm = r.value; openAdd(); };
   });
-  $('btnAddClose').onclick = () => $('addVeil').classList.remove('on');
+  $('btnAddClose').onclick = () => { stopLoginPoll(); loginID = ''; $('addVeil').classList.remove('on'); };
   $('btnCopyUrl').onclick = () => {
     if (navigator.clipboard) navigator.clipboard.writeText($('addUrl').textContent).catch(() => {});
   };
   // 新标签页打开：点击是用户手势，弹窗拦截不挡；noopener 不给新页面 window.opener 句柄。
   $('btnOpenUrl').onclick = () => window.open($('addUrl').textContent, '_blank', 'noopener');
-  $('btnAddFinish').onclick = finishAdd;
   $('btnRefreshLogin').onclick = refreshLogin;
-  $('callback').addEventListener('keydown', e => { if (e.key === 'Enter') finishAdd(); });
   $('btnKey').onclick = submitKey;
   $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') submitKey(); });
 
