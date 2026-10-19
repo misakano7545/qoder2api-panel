@@ -429,3 +429,24 @@ func TestPeekKeepsFirstFrame(t *testing.T) {
 		t.Fatalf("首帧被窥帧吃掉了：%s", string(out))
 	}
 }
+
+// 备用端点连不上时，不能把「排队」这个结论覆盖掉（否则号会被记成故障、进熔断）。
+func TestFailoverKeepsBusyError(t *testing.T) {
+	busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"code":"10605","message":"{\"isQueued\":true}"}`)
+	}))
+	defer busy.Close()
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close() // 端口立刻不可连
+
+	c := New()
+	c.SetAgentHosts(busy.URL, busy.URL)
+	c.chatBasesOverride = []string{busy.URL, deadURL}
+	_, _, _, err := c.ChatStream(testAccount(), []byte(`{"model":"Auto","messages":[]}`))
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != ErrBusy {
+		t.Fatalf("应保留排队结论，得到 %v", err)
+	}
+}

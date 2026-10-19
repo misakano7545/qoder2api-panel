@@ -540,7 +540,12 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		if err == nil {
 			return rc, status, raw, nil
 		}
-		lastStatus, lastBody, lastErr = status, raw, err
+		// 保留更有信息量的那个错误：端点互备时「某个备用端点连不上」不该覆盖
+		// 「上游说排队」——后者才决定调用方要不要等，也决定别把号记成故障。
+		if lastErr == nil || errorRank(err) > errorRank(lastErr) {
+			lastErr = err
+		}
+		lastStatus, lastBody = status, raw
 		// 只有「排队/容量窗口」和传输层失败才换端点：额度不足、凭证失效换端点也没用。
 		if i == len(candidates)-1 || !endpointRetryable(err) {
 			break
@@ -676,6 +681,23 @@ func (c *Client) buildChatPlan(a *auth.Auth, body []byte) (*chatPlan, error) {
 		bases = c.chatBasesOverride
 	}
 	return &chatPlan{url: url, urls: bases, headers: headers, body: encoded, model: model}, nil
+}
+
+// errorRank 给错误排个「信息量」：排队 > 服务端/传输 > 其它。
+func errorRank(err error) int {
+	var ue *Error
+	if !errors.As(err, &ue) {
+		return 0
+	}
+	switch ue.Kind {
+	case ErrBusy:
+		return 3
+	case ErrPlanLimit, ErrSoftRate:
+		return 2
+	case ErrServer:
+		return 1
+	}
+	return 0
 }
 
 // endpointRetryable 判断这次失败该不该换端点重发：排队/服务不可用/连不上都值得换，
