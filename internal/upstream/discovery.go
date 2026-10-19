@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -109,6 +110,56 @@ func (c *Client) WaitQueue(a *authState, requestSetID, modelKey string, budget t
 		}
 		time.Sleep(wait)
 	}
+}
+
+// ExchangeJobToken 用设备令牌（dt-）换取作业令牌（jt-）。
+//
+// 实测（国内版登录链路）：
+//   POST /api/v1/me/jobToken
+//   Authorization: Bearer dt-…
+//   {"clientId":"732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"}
+//
+// 返回体里的令牌字段兼容几种常见命名（device_token / job_token / token）。
+func (c *Client) ExchangeJobToken(a *authState, clientID string) (string, error) {
+	if clientID == "" {
+		clientID = QoderClientID
+	}
+	body, err := json.Marshal(map[string]string{"clientId": clientID})
+	if err != nil {
+		return "", &Error{Kind: ErrServer, Status: 500, Msg: "构造 jobToken 请求失败"}
+	}
+	req, err := http.NewRequest(http.MethodPost, c.apiBase(a.Realm())+JobTokenPath, bytes.NewReader(body))
+	if err != nil {
+		return "", &Error{Kind: ErrServer, Status: 500, Msg: "构造 jobToken 请求失败"}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.JWT())
+	for key, value := range OpenAPIHeaders(a.JWT()) {
+		req.Header.Set(key, value)
+	}
+	raw, err := c.do(req)
+	if err != nil {
+		return "", err
+	}
+	data, err := payloadOf(raw, "作业令牌兑换")
+	if err != nil {
+		return "", err
+	}
+	// 有些部署把结果包在 data/payload 里。
+	for _, key := range []string{"data", "payload", "result"} {
+		if nested, ok := data[key].(map[string]any); ok {
+			for k, v := range nested {
+				if _, exists := data[k]; !exists {
+					data[k] = v
+				}
+			}
+		}
+	}
+	token := text(data, "device_token", "deviceToken", "job_token", "jobToken", "token", "access_token")
+	if token == "" {
+		return "", &Error{Kind: ErrServer, Status: 502, Msg: "作业令牌兑换响应缺少令牌"}
+	}
+	return token, nil
 }
 
 // RegionEndpoints 是 /algo/api/v5/service/region/endpoints 的响应形状。

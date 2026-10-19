@@ -37,6 +37,10 @@ const (
 	DeviceLoginPath   = "/device/selectAccounts"
 	DevicePollPath    = "/api/v1/deviceToken/poll"
 	ExchangePath      = "/api/v1/jobToken/exchange"
+	// JobTokenPath 是「设备令牌换作业令牌」的入口（实测两区都有）。
+	// POST body: {"clientId":"<QoderClientID>"}，Authorization: Bearer dt-…
+	// 返回的 jt- 令牌才是后续 openapi 的凭证。
+	JobTokenPath = "/api/v1/me/jobToken"
 	UserInfoPath      = "/api/v1/userinfo"
 	UsagePath         = "/api/v2/quota/usage"
 	PlanPath          = "/api/v2/user/plan"
@@ -114,6 +118,10 @@ const (
 	// OpenAPICosyVersion 是 openapi 一族用的协议版本。
 	// 实测与推理网关同版本（1.1.69），不再是旧的 1.0.1。
 	OpenAPICosyVersion = "1.1.69"
+
+	// QoderClientID 是 Qoder 桌面端的 OAuth client_id（实测两区同值，
+	// 出现在 device/selectAccounts 的 client_id 与 jobToken 的 clientId）。
+	QoderClientID = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"
 	// MaxOutputTokens 是单次输出上限；实测客户端发的是 32000，
 	// 超过约 32K 上游行为会退化。
 	MaxOutputTokens = 32000

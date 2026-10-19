@@ -323,14 +323,14 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 	if limit > MaxOutputTokens {
 		limit = MaxOutputTokens
 	}
-	recordID := recordIDFor(model.UpstreamKey, messages, tools, limit)
 	lastUser := lastUserText(messages)
 	sessionSeed := firstString(in["user"], in["session_id"])
 
 	parameters := map[string]any{
-		"max_tokens":     limit,
-		// 实测必带：上游按这个值决定上下文预算，缺了会被截断成默认。
-		"context_length": model.ContextWindow,
+		"max_tokens": limit,
+		// 实测恒为 200000（两区、各档位样本都一样），不跟随模型
+		// 的 max_input_tokens（180000/1000000 都出现过，但这里始终 200000）。
+		"context_length": DefaultContextWindow,
 	}
 	if thinking.Enable != nil {
 		if *thinking.Enable {
@@ -346,10 +346,17 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 		tools = []any{}
 	}
 
+	// 实测：request_id == chat_record_id（同一次请求），
+	// request_set_id == business.id（同一轮对话集合）。
+	// 旧实现把 request_id 和 chat_record_id 拆成了两个值，上游虽然容忍，
+	// 但会让服务端的 request/record 关联断掉。
+	requestID := randomUUIDOrEmpty()
+	recordSetID := recordIDFor(model.UpstreamKey, messages, tools, limit)
+
 	return map[string]any{
-		"request_id":       randomUUIDOrEmpty(),
-		"request_set_id":   recordID,
-		"chat_record_id":   recordID,
+		"request_id":       requestID,
+		"request_set_id":   recordSetID,
+		"chat_record_id":   requestID,
 		"session_id":       sessionIDFor(userID, model.UpstreamKey, sessionSeed),
 		"stream":           true,
 		"chat_task":        upstreamChatTask,
@@ -360,9 +367,6 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 		"session_type":     upstreamSessionType,
 		"agent_id":         upstreamAgentID,
 		"task_id":          "common",
-		"code_language":    "",
-		"chat_prompt":      "",
-		"image_urls":       nil,
 		"aliyun_user_type": "",
 		// 实测 system 是 [{type:text,text:…}] 的块数组（与 messages[0] 同内容），
 		// 不是空串；messages 里的 system 轮次同样必须保留。
@@ -392,7 +396,7 @@ func buildUpstreamBody(in map[string]any, model ModelInfo, userID string) map[st
 			"version":   cosy.GatewayVersion,
 			"type":      cosy.BusinessType,
 			"stage":     "start",
-			"id":        recordID,
+			"id":        recordSetID,
 			"name":      truncate(lastUser, 40),
 			"begin_at":  time.Now().UnixMilli(),
 			"model_key": model.UpstreamKey,
@@ -426,8 +430,13 @@ func slimModelConfig(model ModelInfo) map[string]any {
 }
 
 // systemBlocks 生成上游要的 system 块数组。
+// 实测两区都是 2 个 text block（第一块是指令原文，第二块是环境附加段），
+// 不是空串也不是单块。
 func systemBlocks(text string) []any {
-	return []any{map[string]any{"type": "text", "text": text}}
+	return []any{
+		map[string]any{"type": "text", "text": text},
+		map[string]any{"type": "text", "text": ""},
+	}
 }
 
 // lastUserText 取最后一条用户文本（上游要求带在 context 与 business 里）。
