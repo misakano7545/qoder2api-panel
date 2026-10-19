@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,8 @@ func newTestPanel(t *testing.T) (*Panel, *upstream.Client, *pool.Pool) {
 			_, _ = io.WriteString(w, `{"plan_tier_name":"Pro"}`)
 		case "/sash/api/v1/me/campaigns":
 			_, _ = io.WriteString(w, `{"campaigns":[{"campaignId":"c-1","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMED"}]}`)
+		case "/api/v1/deviceToken/refresh":
+			_, _ = io.WriteString(w, `{"device_token":"dt-r","refresh_token":"drt-r","expires_at":4102444800000}`)
 		case "/api/v1/jobToken/exchange":
 			_, _ = io.WriteString(w, `{"token":"jt-x","refresh_token":"jrt-x","expires_at":4102444800000}`)
 		case "/api/v1/userinfo":
@@ -144,6 +147,36 @@ func TestImportPAT(t *testing.T) {
 	}
 	if _, ok := p.Status("u-1"); !ok {
 		t.Errorf("导入后账号应进池")
+	}
+}
+
+// 设备授权：start 给出链接与任务 id；拿过期/未知 id 来 finish 要 410 而不是傻等。
+func TestDeviceLoginStartAndUnknownFinish(t *testing.T) {
+	pn, _, _ := newTestPanel(t)
+	code, body := call(t, pn, http.MethodPost, "/panel/api/login/start", `{"realm":"cn"}`)
+	if code != http.StatusOK {
+		t.Fatalf("login/start status = %d", code)
+	}
+	if body["id"] == "" || !strings.Contains(fmt.Sprint(body["url"]), "challenge_method=S256") {
+		t.Errorf("授权链接形态不对: %v", body)
+	}
+	if code, _ := call(t, pn, http.MethodPost, "/panel/api/login/finish", `{"id":"nope"}`); code != http.StatusGone {
+		t.Errorf("未知会话应 410，得到 %d", code)
+	}
+}
+
+// refreshToken 直登：一条裸刷新令牌 → 续期 → userinfo → 落盘入池。
+func TestLoginRefreshBareToken(t *testing.T) {
+	pn, _, p := newTestPanel(t)
+	code, body := call(t, pn, http.MethodPost, "/panel/api/login/refresh", `{"refresh_token":"drt-1","realm":"global"}`)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", code, body)
+	}
+	if body["uid"] != "u-1" {
+		t.Errorf("uid = %v", body["uid"])
+	}
+	if _, ok := p.Status("u-1"); !ok {
+		t.Errorf("账号应进池")
 	}
 }
 
