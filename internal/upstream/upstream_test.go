@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -323,7 +324,7 @@ func TestExchangePAT(t *testing.T) {
 	srv := fakeUpstream(t)
 	c := New()
 	c.SetAPIHosts(srv.URL, srv.URL)
-	a, err := c.ExchangePAT(t.Context(), "pt-1", auth.RealmGlobal, "m-9")
+	a, err := c.ExchangePAT(context.Background(), "pt-1", auth.RealmGlobal, "m-9")
 	if err != nil {
 		t.Fatalf("ExchangePAT 出错: %v", err)
 	}
