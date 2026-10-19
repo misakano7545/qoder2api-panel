@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -32,9 +33,9 @@ type Config struct {
 	DefaultModel string          // 默认 Auto
 	PromptMode   string          // passthrough / custom / append
 	PromptText   string          // custom/append 用的提示词文本
-	Session     *session.Router // 可选，会话粘性（同一会话粘同一账号）
-	Panel       http.Handler    // 可选，/panel/
-	Usage       *usage.Recorder // 可选，逐请求用量台账（按 账号×模型×时间片 分桶）
+	Session      *session.Router // 可选，会话粘性（同一会话粘同一账号）
+	Panel        http.Handler    // 可选，/panel/
+	Usage        *usage.Recorder // 可选，逐请求用量台账（按 账号×模型×时间片 分桶）
 	// RequestLog 可选，请求级指标/归档（nil = 不记录）。RequestClientInfo 决定事件里
 	// 是否填调用来源（IP/UA）——比 token 计数敏感，运营可自行决定是否落盘。
 	RequestLog        *reqlog.Recorder
@@ -381,10 +382,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 调用，把这一号的在途名额永久漏掉；闭包让每个号各 defer 一次。
 		var done bool
 		var err error
-		func() {
-			defer release()
-			done, err = h.attempt(w, acct, body, peek, sessKey, traceFrom(r))
-		}()
+		// 排队（10605 / isQueued）不是失败，也不该换号：它是模型侧的窗口。按上游建议的
+		// 时长等一会儿，对**同一账号**重发同一请求（最多 2 次）；客户端断开就不再白打。
+		for retry := 0; ; retry++ {
+			func() {
+				defer release()
+				done, err = h.attempt(r.Context(), w, acct, body, peek, sessKey, traceFrom(r))
+			}()
+			if done || err == nil || !isQueueError(err) || queueHopeless(err) || retry >= 2 {
+				break
+			}
+			delay := queueDelay(err)
+			log.Printf("排队 %s：模型 %s 暂不可服务，%s 后重发（第 %d/2 次）", acct.UID, peek.Model, delay, retry+1)
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(delay):
+			}
+		}
 		if done {
 			return
 		}
@@ -403,6 +418,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 别再报「账号都不可用」——号是好的，是请求本身被上游拒了。照实回上游的原话。
 	// 实测 2026-09-28：coder 通道 4011 期间，同一账号的 Work 通道照常出正文。
 	if lastErr != nil {
+		if isQueueError(lastErr) {
+			msg := "上游模型排队中（" + peek.Model + "）：已按上游建议重试 2 次仍排不上，请稍后再发"
+			if queueHopeless(lastErr) {
+				msg = "上游当前对该模型不可服务（" + peek.Model + "，serviceAvailable=false）：这是上游容量/套餐侧状态，与账号无关，请稍后再发或换模型"
+			}
+			writeOpenAIError(w, http.StatusServiceUnavailable, "qoder_model_busy", msg)
+			return
+		}
 		var se *upstream.StreamError
 		if errors.As(lastErr, &se) && se.Kind() == upstream.ErrNone {
 			writeOpenAIError(w, http.StatusTooManyRequests, "upstream_rejected", se.Error())
@@ -414,6 +437,45 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg += ": " + lastErr.Error()
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+}
+
+// isQueueError 判断是不是「上游排队」：这既不罚号，也不该立刻回错。
+func isQueueError(err error) bool {
+	// 排队有两种落点：HTTP 403 直接拒（*Error），或 200 信封里 statusCodeValue=403（*StreamError）。
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.Kind == upstream.ErrBusy {
+		return true
+	}
+	var se *upstream.StreamError
+	return errors.As(err, &se) && se.Kind() == upstream.ErrBusy
+}
+
+// queueHopeless 上游明说 serviceAvailable:false 时不再等：等满建议时长也排不上。
+func queueHopeless(err error) bool {
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.ServiceUnavailable {
+		return true
+	}
+	var se *upstream.StreamError
+	return errors.As(err, &se) && se.ServiceUnavailable
+}
+
+// queueDelay 跟随上游建议的重试间隔（retryAfterSeconds / waitTime），缺省 15 秒，
+// 上限 30 秒——等得比上游建议更久只会把首字等待拖长。
+func queueDelay(err error) time.Duration {
+	secs := int64(15)
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.RetryAfterSecs > 0 {
+		secs = ue.RetryAfterSecs
+	}
+	var se *upstream.StreamError
+	if errors.As(err, &se) && se.RetryAfterSecs > 0 {
+		secs = se.RetryAfterSecs
+	}
+	if secs > 30 {
+		secs = 30
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // acquireAccount 挑一个账号并占用在途名额：会话粘性命中优先，否则按权重挑。
@@ -446,7 +508,7 @@ func (h *Handler) acquireAccount(tried map[string]bool, sessKey, realm string) (
 //
 // done=true 表示响应已写给客户端，调用方必须停止轮转；err 非 nil 表示这次尝试失败、
 // 可以换下一个号（错误只用于最终 503 的说明文案）。
-func (h *Handler) attempt(w http.ResponseWriter, acct *auth.Auth, body []byte, peek chatRequest, sessKey string, tr *reqTrace) (bool, error) {
+func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth.Auth, body []byte, peek chatRequest, sessKey string, tr *reqTrace) (bool, error) {
 	refreshed, err := h.cfg.Upstream.RefreshTokenIfNeeded(acct, h.cfg.RefreshSkew)
 	if err != nil {
 		var ue *upstream.Error
@@ -493,10 +555,10 @@ func (h *Handler) attempt(w http.ResponseWriter, acct *auth.Auth, body []byte, p
 			h.handleStreamError(acct.UID, se)
 		})
 		rc.Close()
-		// 空流（上游 200 但零模型事件）：这次尝试一个字节都没写给客户端，
-		// 换号重试比把空回复当成功更合适（照 Trae2api-cn 的「首事件前空响应可重试」）。
-		// 注意不能算 NoteError：空转不是账号故障，罚它会白白把好号熔断掉。
-		if errors.Is(serr, upstream.ErrEmptyStream) {
+		// serr 非 nil 只可能是「一个字节都没写给客户端」的失败（空流 / 首帧就是错误信封）：
+		// 此时响应还没提交，必须交回调用方换号或如实回错误体——早先这里只处理空流，
+		// 首帧错误的流会 return true 变成空 200（客户端收到的是一段没有内容的回复）。
+		if serr != nil {
 			h.noteUsage(acct.UID, peek.Model, attemptStart, false, nil, tr)
 			return false, serr
 		}
@@ -563,6 +625,9 @@ func (h *Handler) noteFailure(uid string, kind upstream.ErrKind) {
 		h.cfg.Pool.NoteSessionDead(uid)
 	case upstream.ErrServer:
 		h.cfg.Pool.NoteError(uid)
+	case upstream.ErrBusy:
+		// 排队/资源受限是模型侧的窗口，与账号健康无关：罚号只会把好号推向熔断。
+		// no-op
 	default:
 		h.cfg.Pool.NoteDegrade(uid)
 	}

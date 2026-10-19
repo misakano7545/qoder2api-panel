@@ -179,6 +179,20 @@ func TestStreamWritesFrames(t *testing.T) {
 	}
 }
 
+// serviceAvailable:false 埋在两层转义 JSON 里，也要认出来（等也没用，要快失败）。
+func TestQueueUnavailableParse(t *testing.T) {
+	raw := `{"code":"403","message":"{\"code\":\"10605\",\"message\":\"{\\\"isQueued\\\":true,\\\"serviceAvailable\\\":false}"}"}`
+	if !queueUnavailable(raw) {
+		t.Error("serviceAvailable:false 没认出来")
+	}
+	if queueUnavailable(`{"serviceAvailable":true}`) {
+		t.Error("serviceAvailable:true 被误判成不可服务")
+	}
+	if got := retryAfterOf(raw); got != 0 {
+		t.Errorf("这次样本没有 retryAfterSeconds，应为 0，得到 %d", got)
+	}
+}
+
 func TestClassify(t *testing.T) {
 	cases := []struct {
 		status int

@@ -18,6 +18,10 @@ type StreamError struct {
 	KindValue ErrKind
 	Status    int
 	Msg       string
+	// RetryAfterSecs 是上游建议的重试间隔（排队时才有），供调用方退避重发。
+	RetryAfterSecs int64
+	// ServiceUnavailable = serviceAvailable:false：此刻排不上，等也没用。
+	ServiceUnavailable bool
 }
 
 func (e *StreamError) Error() string {
@@ -45,6 +49,10 @@ type sseEvent struct {
 	Class   ErrKind
 	Raw     string
 	Message string
+	// RetryAfterSecs 是信封里给的重试间隔（排队态），0 = 没给。
+	RetryAfterSecs int64
+	// ServiceUnavailable = serviceAvailable:false。
+	ServiceUnavailable bool
 }
 
 // lineBuffer 按字节缓冲 SSE 行：只在完整行上解码，避免把多字节字符切坏。
@@ -111,7 +119,8 @@ func parseSSELine(data string) sseEvent {
 			}
 		}
 		class := classifyErrorText(status, raw)
-		return sseEvent{Kind: sseError, Status: status, Class: class, Raw: truncate(raw, 500), Message: messageOf(class)}
+		return sseEvent{Kind: sseError, Status: status, Class: class, Raw: truncate(raw, 500),
+			Message: messageOf(class), RetryAfterSecs: retryAfterOf(raw), ServiceUnavailable: queueUnavailable(raw)}
 	}
 	inner, ok := envelope["body"]
 	if !ok {
@@ -390,7 +399,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				event := parseSSELine(data)
 				switch event.Kind {
 				case sseError:
-					return nil, &StreamError{KindValue: event.Class, Status: event.Status, Msg: event.Raw}
+					return nil, &StreamError{KindValue: event.Class, Status: event.Status, Msg: event.Raw,
+						RetryAfterSecs: event.RetryAfterSecs, ServiceUnavailable: event.ServiceUnavailable}
 				case sseDone:
 					if !acc.sawAny {
 						return nil, ErrEmptyStream
@@ -406,7 +416,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				event := parseSSELine(data)
 				switch event.Kind {
 				case sseError:
-					return nil, &StreamError{KindValue: event.Class, Status: event.Status, Msg: event.Raw}
+					return nil, &StreamError{KindValue: event.Class, Status: event.Status, Msg: event.Raw,
+						RetryAfterSecs: event.RetryAfterSecs, ServiceUnavailable: event.ServiceUnavailable}
 				case sseDone:
 					if !acc.sawAny {
 						return nil, ErrEmptyStream
@@ -511,7 +522,8 @@ func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError
 	handle := func(event sseEvent) (bool, error) {
 		switch event.Kind {
 		case sseError:
-			se := &StreamError{KindValue: event.Class, Status: event.Status, Msg: event.Message}
+			se := &StreamError{KindValue: event.Class, Status: event.Status, Msg: event.Message,
+				RetryAfterSecs: event.RetryAfterSecs, ServiceUnavailable: event.ServiceUnavailable}
 			if onErr != nil {
 				onErr(se)
 			}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,8 @@ type Error struct {
 	Msg            string
 	Busy           bool // 排队态：可原地重试
 	RetryAfterSecs int64
+	// ServiceUnavailable = 排队体里 serviceAvailable:false：等也没用，立刻回错。
+	ServiceUnavailable bool
 }
 
 func (e *Error) Error() string {
@@ -550,7 +553,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		if msg == "" {
 			msg = fmt.Sprintf("上游返回 HTTP %d", resp.StatusCode)
 		}
-		return nil, resp.StatusCode, raw, &Error{Kind: kind, Status: resp.StatusCode, Msg: msg}
+		return nil, resp.StatusCode, raw, &Error{Kind: kind, Status: resp.StatusCode, Msg: msg,
+			RetryAfterSecs: retryAfterOf(string(raw)), ServiceUnavailable: queueUnavailable(string(raw))}
 	}
 	return resp.Body, resp.StatusCode, nil, nil
 }
@@ -588,6 +592,34 @@ func (c *Client) buildChatPlan(a *auth.Auth, body []byte) (*chatPlan, error) {
 		return nil, &Error{Kind: ErrServer, Status: 500, Msg: err.Error()}
 	}
 	return &chatPlan{url: url, headers: headers, body: encoded, model: model}, nil
+}
+
+// retryAfterSecsRE 抓上游建议的重试间隔。正文是三层嵌套的 JSON 字符串
+// （{"code":"403","message":"{\"code\":\"10605\",\"message\":\"{...retryAfterSeconds:30}"}"}），
+// 所以先去掉转义再当文本找，比逐层 Unmarshal 少一半代码。
+var (
+	retryAfterRE   = regexp.MustCompile(`"retryAfterSeconds"\s*:\s*(\d+)`)
+	waitTimeRE     = regexp.MustCompile(`"waitTime"\s*:\s*(\d+)`)
+	serviceAvailRE = regexp.MustCompile(`"serviceAvailable"\s*:\s*false`)
+)
+
+// queueUnavailable 看排队体里的 serviceAvailable:false——上游自己说「此刻不可服务」，
+// 那再等建议的 30 秒也排不上，应当立刻如实回错而不是让客户端干等。
+func queueUnavailable(raw string) bool {
+	flat := strings.ReplaceAll(raw, `\`, "")
+	return serviceAvailRE.MatchString(flat)
+}
+
+func retryAfterOf(raw string) int64 {
+	flat := strings.ReplaceAll(raw, `\`, "")
+	for _, re := range []*regexp.Regexp{retryAfterRE, waitTimeRE} {
+		if m := re.FindStringSubmatch(flat); len(m) == 2 {
+			if n, err := strconv.ParseInt(m[1], 10, 64); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // PrepareBody 是入站体的轻量规整钩子：Qoder 的请求体在 buildChatPlan 里整体重建，

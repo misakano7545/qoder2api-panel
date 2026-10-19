@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,14 @@ import (
 // fakeQoder 是最小上游：模型目录 + userinfo + 额度 + 推理 SSE（信封里装 OpenAI chunk）。
 func fakeQoder(t *testing.T, chunks []string) *httptest.Server {
 	t.Helper()
+	return fakeQoderQueue(t, chunks, 0, false)
+}
+
+// fakeQoderQueue 的前 queueN 次 chat 请求回「排队」（403 + 10605 + retryAfterSeconds），
+// 之后正常出流——用来钉住「排队要等一会儿重发，而不是立刻 503」。
+func fakeQoderQueue(t *testing.T, chunks []string, queueN int, envelopeQueue bool) *httptest.Server {
+	t.Helper()
+	var seen atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/algo/api/v2/model/list"):
@@ -36,6 +45,19 @@ func fakeQoder(t *testing.T, chunks []string) *httptest.Server {
 			_, _ = io.WriteString(w, `{"plan_tier_name":"Pro"}`)
 			return
 		case strings.HasSuffix(r.URL.Path, "/agent_chat_generation"):
+			if int(seen.Add(1)) <= queueN {
+				w.Header().Set("Content-Type", "application/json")
+				if !envelopeQueue {
+					w.WriteHeader(http.StatusForbidden) // 形态一：403 直接拒
+					_, _ = io.WriteString(w, `{"code":"403","message":"{\"code\":\"10605\",\"message\":\"{\\\"isQueued\\\":true,\\\"modelKey\\\":\\\"auto\\\",\\\"queueType\\\":\\\"p3\\\",\\\"retryAfterSeconds\\\":1,\\\"serviceAvailable\\\":true}"}"}`)
+					return
+				}
+				// 形态二：200 的信封里 statusCodeValue=403（实测上游就是这样回来的）
+				inner := `{"code":"10605","message":"{\"isQueued\":true,\"retryAfterSeconds\":1,\"serviceAvailable\":true}"}`
+				env, _ := json.Marshal(map[string]any{"statusCodeValue": 403, "body": inner})
+				_, _ = io.WriteString(w, "data: "+string(env)+"\n\n")
+				return
+			}
 			// 签名与编码体必须真的存在，否则「跑通」没有意义。
 			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer COSY.") {
 				t.Errorf("缺少 COSY 签名头")
@@ -188,6 +210,61 @@ func TestChatCompletionsToolCalls(t *testing.T) {
 	}
 	if resp.Choices[0].FinishReason != "tool_calls" {
 		t.Errorf("finish_reason = %q", resp.Choices[0].FinishReason)
+	}
+}
+
+// 排队（10605）不是失败：等上游建议的 1 秒后重发同一请求，第二次直接出字。
+func TestQueuedRequestIsRetried(t *testing.T) {
+	fake := fakeQoderQueue(t, []string{
+		`{"id":"c1","model":"Auto","choices":[{"index":0,"delta":{"content":"排队后成功"},"finish_reason":"stop"}]}`,
+	}, 1, false)
+	h := newTestHandler(t, fake.URL)
+	body := `{"model":"Auto","messages":[{"role":"user","content":"hi"}]}`
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("排队后应重发成功，得到 %d：%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "排队后成功") {
+		t.Errorf("正文缺失: %s", rec.Body.String())
+	}
+	if waited := time.Since(start); waited < 900*time.Millisecond {
+		t.Errorf("应等上游建议的 1 秒再重发，实际只花了 %v", waited)
+	}
+}
+
+// 同一条排队语义，但上游用 200 信封承载 403（实测形态）：也必须等一会儿重发。
+func TestEnvelopeQueuedRequestIsRetried(t *testing.T) {
+	fake := fakeQoderQueue(t, []string{
+		`{"id":"c1","model":"Auto","choices":[{"index":0,"delta":{"content":"信封排队后成功"},"finish_reason":"stop"}]}`,
+	}, 1, true)
+	h := newTestHandler(t, fake.URL)
+	body := `{"model":"Auto","messages":[{"role":"user","content":"hi"}]}`
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "信封排队后成功") {
+		t.Fatalf("信封排队应重发成功，得到 %d：%s", rec.Code, rec.Body.String())
+	}
+	if waited := time.Since(start); waited < 900*time.Millisecond {
+		t.Errorf("应按 retryAfterSeconds 等 1 秒，实际 %v", waited)
+	}
+}
+
+// 一直排队：重试预算（2 次）用尽后必须回 qoder_model_busy，而不是谎称「号都不可用」。
+func TestQueueBudgetExhausted(t *testing.T) {
+	fake := fakeQoderQueue(t, nil, 5, false) // 永远排队
+	h := newTestHandler(t, fake.URL)
+	body := `{"model":"Auto","messages":[{"role":"user","content":"hi"}]}`
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "qoder_model_busy") {
+		t.Fatalf("应回 qoder_model_busy，得到 %d：%s", rec.Code, rec.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed < 2*time.Second {
+		t.Errorf("应该先按上游建议重试 2 次，实际只花了 %v", elapsed)
 	}
 }
 
