@@ -1625,7 +1625,7 @@ async function loadPackages() {
 /* ── 添加账号（不轮询：贴回调地址换票）────────────────────────────── */
 // 地区：链接按地区切域（国内 www.trae.cn / 国际 www.trae.ai）。回调自带 OAuth host，
 // 所以换票那步不用再选一次——面板按 host 自动落 domain/apiHost。
-let addRealm = 'intl'; // 与弹窗里默认勾选的单选一致（Qoder 国际号更常见）
+let addRealm = 'cn'; // 与弹窗里默认勾选的单选一致
 let addTab = 'browser';
 
 // switchAddTab 主按钮跟着 tab 走：一屏只有一个「加入」，避免两个并列主 CTA 抢焦点。
