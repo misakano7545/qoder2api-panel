@@ -129,3 +129,7 @@ login/* / accounts/* / checkin / balance / keepalive）。空 `api_key` 时只�
 go vet ./...
 go test ./...        # COSY 已知向量、凭证解析、SSE 信封、端到端假上游（流式/非流式/工具调用/签到）
 ```
+
+没有真账号时联调全链路：`python3 scripts/qoder_stub.py 7899` 起假上游，另起一个实例把
+`upstream.gateway_host`/`gateway_host_cn` 指向 `http://127.0.0.1:7899/`、放一份假凭证进
+`auths/qoder-<uid>.json`，即可验证签名→组包→SSE 转换（桩会拒绝没有 COSY 头的请求）。
