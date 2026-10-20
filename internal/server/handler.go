@@ -231,7 +231,7 @@ func (h *Handler) modelRealm(model string) string {
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0, 32)
 	for _, mi := range h.cfg.Upstream.Catalog() {
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"id":                mi.Realm + ":" + mi.ID,
 			"object":            "model",
 			"created":           1753600000,
@@ -242,9 +242,22 @@ func (h *Handler) modelList() []map[string]any {
 			"efforts":           mi.Efforts,
 			"vision":            mi.VL,
 			"credits":           mi.Credits,
-		})
+		}
+		if mi.OffPeakWindow != "" {
+			entry["off_peak"] = offPeakOf(mi)
+		}
+		out = append(out, entry)
 	}
 	return out
+}
+
+// offPeakOf 是错峰折扣的对外形状：倍率、时段、上游当前是否在窗口内。
+func offPeakOf(mi upstream.ModelInfo) map[string]any {
+	return map[string]any{
+		"factor": "x" + mi.OffPeakFactor,
+		"window": mi.OffPeakWindow,
+		"active": mi.OffPeakActive,
+	}
 }
 
 // Models 是面板模型页的载荷：每条带 realm 前缀与页面需要的展示字段（能力胶囊、
@@ -265,6 +278,9 @@ func (h *Handler) Models() []map[string]any {
 			"upstream_key":            mi.UpstreamKey,
 			"credits":                 mi.Credits,
 			"thinking":                map[bool]string{true: "enabled", false: "disabled"}[mi.Reasoning],
+		}
+		if mi.OffPeakWindow != "" {
+			entry["off_peak"] = offPeakOf(mi)
 		}
 		if mi.Reasoning {
 			entry["capability"] = "reasoning_model"

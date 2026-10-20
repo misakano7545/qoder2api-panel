@@ -447,7 +447,9 @@ function mdRowHtml(m) {
     '<td>' + thinkCell(m) + '</td>' +
     '<td>' + tag('mute', fnLabel(m.function)) + '</td>' +
     // 倍率：上游基准积分倍率（客户端选择器同源）。没有就是上游没给，显示 — 而不是编一个数。
-    '<td class="num">' + (m.credit_rate ? '<b>' + m.credit_rate.toFixed(2) + '×</b>' : '—') + '</td>' +
+    // 有错峰折扣时在倍率下滑一行谷时价（官方 promotion，谷时 = 原价 × 折扣）。
+    '<td class="num">' + (m.credit_rate ? '<b>' + m.credit_rate.toFixed(2) + '×</b>' : '—') +
+      (m.off_peak ? '<div class="id">谷 ' + esc(m.off_peak.factor) + ' ' + esc(m.off_peak.window) + '</div>' : '') + '</td>' +
     '<td class="num"' + (m.context_length_max ? ' title="声明口径 max ' + fmtNum(m.context_length_max) + '（本列显示的是 __dev 实际请求口径）"' : '') + '>' +
       (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
     '<td class="num">' + (m.max_output_tokens ? Math.round(m.max_output_tokens / 1000) + 'K' : '—') + '</td></tr>';

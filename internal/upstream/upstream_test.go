@@ -511,3 +511,31 @@ func TestOrgPackageUnavailableIgnored(t *testing.T) {
 		t.Errorf("不该有组织额度行：%+v", packs)
 	}
 }
+
+// 错峰折扣：谷时 = 原价 × 折扣系数（实测 0.5×0.4=0.2），窗口跨零点也要原样带出。
+func TestPromotionOffPeak(t *testing.T) {
+	payload := map[string]any{"chat": []any{map[string]any{
+		"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "price_factor": 0.5,
+		"max_input_tokens": 200000, "enable": true,
+		"promotion": map[string]any{
+			"active": false, "discount_factor": 0.4, "before_promotion_price_factor": 0.5,
+			"window_start": "22:00", "window_end": "08:00",
+		},
+	}}}
+	got := parseCatalog(payload, auth.RealmCN)
+	if len(got) != 1 {
+		t.Fatalf("应解析出 1 条，得到 %d", len(got))
+	}
+	m := got[0]
+	if m.OffPeakFactor != "0.2" || m.OffPeakWindow != "22:00-08:00" || m.OffPeakActive {
+		t.Fatalf("错峰字段错：%+v", m)
+	}
+
+	// 没有 promotion 的模型不能凭空长出谷时价。
+	plain := parseCatalog(map[string]any{"chat": []any{map[string]any{
+		"key": "qfmodel", "display_name": "Qwen3.8-Flash", "price_factor": 0.1,
+	}}}, auth.RealmCN)
+	if len(plain) != 1 || plain[0].OffPeakWindow != "" {
+		t.Fatalf("无 promotion 时应留空：%+v", plain)
+	}
+}

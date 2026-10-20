@@ -24,8 +24,13 @@ type ModelInfo struct {
 	VL            bool     `json:"vl"`
 	Enabled       bool     `json:"enabled"`
 	Credits       string   `json:"credits,omitempty"`
-	Realm         string   `json:"realm,omitempty"`
-	Source        string   `json:"source,omitempty"`
+	// OffPeakFactor / OffPeakWindow 是错峰折扣（官方 promotion）：谷时倍率与时段，
+	// 实测 Qwen3.8-Max 峰 0.5 / 谷 0.2、22:00-08:00 UTC+8。无折扣时留空。
+	OffPeakFactor string `json:"off_peak_factor,omitempty"`
+	OffPeakWindow string `json:"off_peak_window,omitempty"`
+	OffPeakActive bool   `json:"off_peak_active,omitempty"`
+	Realm         string `json:"realm,omitempty"`
+	Source        string `json:"source,omitempty"`
 }
 
 // fallbackRow 是静态兜底目录的一行（官方目录拉不到时仍能出模型列表）。
@@ -313,6 +318,7 @@ func parseCatalog(payload map[string]any, realm string) []ModelInfo {
 		model := makeModel(id, key, truthy(item["is_reasoning"]) || truthy(item["thinking_config"]),
 			effortsOf(item), truthy(item["is_vl"]), truthy(item["enable"]), factor, realm)
 		model.Name = display
+		applyPromotion(&model, item["promotion"])
 		model.Source = orDefault(text(item, "source"), "system")
 		if context := int64Of(item["max_input_tokens"]); context > 0 {
 			model.ContextWindow = context
@@ -321,6 +327,26 @@ func parseCatalog(payload map[string]any, realm string) []ModelInfo {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// applyPromotion 读官方 promotion 块算谷时倍率：谷时 = 原价 × 折扣系数
+// （before_promotion_price_factor × discount_factor，实测 0.5×0.4=0.2）。
+func applyPromotion(m *ModelInfo, raw any) {
+	promo, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	base, discount := numberOrNil(promo["before_promotion_price_factor"]), numberOrNil(promo["discount_factor"])
+	if base == nil || discount == nil {
+		return
+	}
+	start, end := text(promo, "window_start"), text(promo, "window_end")
+	if start == "" || end == "" {
+		return
+	}
+	m.OffPeakFactor = trimFloat(*base * *discount)
+	m.OffPeakWindow = start + "-" + end
+	m.OffPeakActive = truthy(promo["active"])
 }
 
 // envelopeError 取上游信封里的业务错误文案（200 或缺失视为正常）。
