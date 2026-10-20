@@ -72,7 +72,29 @@ func (c *Client) FetchPlan(a *authState) (map[string]any, error) {
 	return payloadOf(resp, "套餐查询")
 }
 
-// UserEntUsageDetail 拉额度并归一成面板口径：个人额度 + 资源包剩余。
+// orgBucket 取组织资源包。总量字段叫 cap（不是 total），另有 available 布尔标它是否真发放：
+// 实测形状（agent2api 记录，国际版 Teams 号）
+// `{"used":0,"remaining":0,"percentage":0,"unit":"credits","cap":0,"available":false}`
+// —— 空桶也会整个键返回，所以「键在不在」不是判据。
+func orgBucket(raw map[string]any) (map[string]any, int64) {
+	org, ok := raw["orgResourcePackage"].(map[string]any)
+	if !ok {
+		return nil, 0
+	}
+	if avail, has := org["available"].(bool); has && !avail {
+		return nil, 0
+	}
+	cap := int64Of(org["cap"])
+	if cap == 0 {
+		cap = int64Of(org["total"]) // 老形状兜底
+	}
+	if cap <= 0 && int64Of(org["remaining"]) <= 0 {
+		return nil, 0
+	}
+	return org, cap
+}
+
+// UserEntUsageDetail 拉额度并归一成面板口径：个人额度 + 资源包剩余 + 组织包剩余。
 func (c *Client) UserEntUsageDetail(a *authState) (EntUsage, error) {
 	raw, err := c.FetchQuota(a)
 	if err != nil {
@@ -82,6 +104,11 @@ func (c *Client) UserEntUsageDetail(a *authState) (EntUsage, error) {
 	addOn, _ := raw["addOnQuota"].(map[string]any)
 	remain := int64Of(quota["remaining"]) + int64Of(addOn["remaining"])
 	total := int64Of(quota["total"]) + int64Of(addOn["total"])
+	// 组织包只有 available:true 时才算（见 orgBucket）。
+	if org, orgTotal := orgBucket(raw); org != nil {
+		remain += int64Of(org["remaining"])
+		total += orgTotal
+	}
 	out := EntUsage{Unit: UnitCredit, Remain: remain, Total: total}
 	out.Expire = int64Of(raw["expiresAt"]) / 1000
 	if out.Expire == 0 {
@@ -143,13 +170,13 @@ func (c *Client) BalancePackages(a *authState) ([]CreditPackage, EntUsage, error
 			Expire: int64Of(addOn["expiresAt"]) / 1000,
 		})
 	}
-	if org, ok := raw["orgResourcePackage"].(map[string]any); ok && int64Of(org["total"]) > 0 {
+	if org, orgTotal := orgBucket(raw); org != nil {
 		packs = append(packs, CreditPackage{
 			Group:  "组织额度",
 			Name:   "组织资源包",
 			Unit:   UnitCredit,
 			Remain: int64Of(org["remaining"]),
-			Size:   int64Of(org["total"]),
+			Size:   orgTotal,
 			Used:   int64Of(org["used"]),
 		})
 	}

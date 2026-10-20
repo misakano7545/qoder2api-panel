@@ -452,3 +452,62 @@ func TestFailoverKeepsBusyError(t *testing.T) {
 		t.Fatalf("应保留排队结论，得到 %v", err)
 	}
 }
+
+// 组织包：总量字段是 cap 不是 total，空桶也会返回整个键（要按 available 判）。
+func TestOrgResourcePackage(t *testing.T) {
+	const quota = `{"userQuota":{"remaining":120,"total":200,"used":80},
+		"orgResourcePackage":{"used":10,"remaining":90,"cap":100,"available":true,"unit":"credits"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/quota/usage" {
+			_, _ = io.WriteString(w, quota)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c := New()
+	c.SetAPIHosts(srv.URL, srv.URL)
+
+	u, err := c.UserEntUsageDetail(testAccount())
+	if err != nil {
+		t.Fatalf("UserEntUsageDetail: %v", err)
+	}
+	if u.Remain != 210 || u.Total != 300 {
+		t.Errorf("组织包没进总额：%+v（应为 remain 210 / total 300）", u)
+	}
+	packs, _, err := c.BalancePackages(testAccount())
+	if err != nil {
+		t.Fatalf("BalancePackages: %v", err)
+	}
+	var org *CreditPackage
+	for i := range packs {
+		if packs[i].Group == "组织额度" {
+			org = &packs[i]
+		}
+	}
+	if org == nil || org.Size != 100 || org.Remain != 90 {
+		t.Fatalf("组织包行应按 cap 出：%+v", packs)
+	}
+}
+
+// available:false 的空组织包不能当成「组织总额 0」画出来，也不能进合计。
+func TestOrgPackageUnavailableIgnored(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"userQuota":{"remaining":120,"total":200,"used":80},
+			"orgResourcePackage":{"used":0,"remaining":0,"cap":0,"available":false}}`)
+	}))
+	defer srv.Close()
+	c := New()
+	c.SetAPIHosts(srv.URL, srv.URL)
+	u, err := c.UserEntUsageDetail(testAccount())
+	if err != nil {
+		t.Fatalf("UserEntUsageDetail: %v", err)
+	}
+	if u.Remain != 120 || u.Total != 200 {
+		t.Errorf("不可用的组织包不该计入：%+v", u)
+	}
+	packs, _, _ := c.BalancePackages(testAccount())
+	if len(packs) != 1 {
+		t.Errorf("不该有组织额度行：%+v", packs)
+	}
+}
