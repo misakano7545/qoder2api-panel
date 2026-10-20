@@ -29,13 +29,18 @@ func TestCountTokens(t *testing.T) {
 
 	small := post(`{"model":"Qwen3.8-Max","messages":[{"role":"user","content":"hi"}]}`)
 	big := post(`{"model":"Qwen3.8-Max","messages":[{"role":"user","content":"` + strings.Repeat("长", 4000) + `"}]}`)
-	if small <= 0 || big < 900 || big <= small {
+	if small <= 0 || big <= small {
 		t.Fatalf("估算不合比例：small=%d big=%d", small, big)
 	}
 
-	// 4000 个汉字 → 约 1000 个「token」（字符/4）；结构字段不该把它抬高太多。
-	if big > 1100 || big < 900 {
-		t.Errorf("4000 汉字估出 %d，超出 900–1100", big)
+	// 4000 个汉字：实测 0.62 token/字 → 约 2480；结构字段不该把它抬高太多。
+	if big < 2200 || big > 2600 {
+		t.Errorf("4000 汉字估出 %d，超出 2200–2600", big)
+	}
+	// 英文按 4 字符/token。
+	en := post(`{"model":"Auto","messages":[{"role":"user","content":"` + strings.Repeat("a", 4000) + `"}]}`)
+	if en < 900 || en > 1100 {
+		t.Errorf("4000 英文字符估出 %d，超出 900–1100", en)
 	}
 
 	// 两条路径都在（/messages/count_tokens 也有）。

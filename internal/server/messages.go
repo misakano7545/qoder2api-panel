@@ -78,7 +78,23 @@ func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 向上取整：极短 prompt 回 0 会让客户端以为「上下文是空的」。
-	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": (countChars(obj) + 3) / 4})
+	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": countChars(obj)})
+}
+
+// countTokensEstimate 按字符类型折算 token：实测中文 0.62 token/字、英文约 4 字符/token
+// （2026-10 长上下文针测试：400k 汉字 = 249,847 token）。纯 chars/4 对中文低估 2.5 倍。
+// 不含 Qoder 上游自己注入的系统提示（客户端看不到，随请求固定，不影响力度的判断）。
+func tokenEstimate(runes []rune) int {
+	n := 0.0
+	for _, r := range runes {
+		switch {
+		case r > 0x2E80: // CJK / 假名 / 谚文
+			n += 0.62
+		default:
+			n += 0.25
+		}
+	}
+	return int(n + 0.999)
 }
 
 // countChars 累加请求里的正文字符：跳过结构字段（模型名/类型/角色/id），只算真正占用
@@ -86,7 +102,7 @@ func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
 func countChars(v any) int {
 	switch t := v.(type) {
 	case string:
-		return len([]rune(t))
+		return tokenEstimate([]rune(t))
 	case []any:
 		n := 0
 		for _, it := range t {
