@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/qoder2api-panel/internal/auth"
+	"github.com/misakano7545/qoder2api-panel/internal/cosy"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -154,6 +155,10 @@ type Client struct {
 
 	uaMu      sync.RWMutex
 	userAgent string
+	// clientVersion 是配置里的 COSY 版本覆盖（空 = 内置 GatewayVersion）。
+	// 它同时参与签名与目录版本闸门，所以必须真的传下去——早先 SetIdentity 收了
+	// 这个参数却丢掉，配置页的 client_version 存了也不生效。
+	clientVersion string
 
 	catMu   sync.RWMutex
 	catalog map[string][]ModelInfo // realm → 条目
@@ -207,11 +212,26 @@ func (c *Client) SetTimeouts(short, header, idle time.Duration) {
 	c.idleTimeout = idle
 }
 
-// SetIdentity 覆盖出站 User-Agent（空 = 用内置 UA）。
-func (c *Client) SetIdentity(userAgent, _ string) {
+// SetIdentity 覆盖出站身份：User-Agent 与 COSY 版本（空 = 各用内置值）。
+func (c *Client) SetIdentity(userAgent, cosyVersion string) {
 	c.uaMu.Lock()
 	c.userAgent = strings.TrimSpace(userAgent)
+	c.clientVersion = strings.TrimSpace(cosyVersion)
 	c.uaMu.Unlock()
+}
+
+// cosyVersion 返回配置里的版本覆盖（空串 = 由 cosy 回落内置值）。
+func (c *Client) cosyVersion() string {
+	c.uaMu.RLock()
+	defer c.uaMu.RUnlock()
+	return c.clientVersion
+}
+
+// ClientIdentity 返回实际生效的出站身份，供面板核对「目录闸门用的到底是哪一版」。
+// 目录条数受 身份+版本 控制（cli/5@1.1.69 拿 14 条、app/10@1.1.69 拿 15 条），
+// 所以这一项必须是可观测的，否则模型少一条只能靠猜。
+func (c *Client) ClientIdentity() (userAgent, version, clientType string) {
+	return c.currentUA(), cosy.EffectiveVersion(c.cosyVersion()), cosy.ClientType
 }
 
 // SetAgentHosts 覆盖网关基址：global 是国际版网关，cn 是国内版网关。
@@ -562,6 +582,72 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	return nil, lastStatus, lastBody, lastErr
 }
 
+// ProbeTimeout 是重测的首帧等待上限：超时按网关错误报，不无限挂着用户的按钮。
+const ProbeTimeout = 30 * time.Second
+
+// Probe 发一次**真实**的最小对话，验证账号此刻能不能接单。
+//
+// 只给面板「重测」按钮用，会真实消耗一次调用（max_tokens=1，成本接近零但不是零），
+// 所以不做自动轮询。语义与「重置标记」严格分开：
+//   - 重测：真发请求，成功才算标记过期，失败如实回报（不清标记）；
+//   - 重置：不发任何网络请求，只清显示。
+//
+// 只看首帧：200 但信封里是 403/额度码照样算失败（上游就是这么回来的）。
+func (c *Client) Probe(a *authState, model string) error {
+	if strings.TrimSpace(model) == "" {
+		model = "Auto"
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"stream":     true,
+		"max_tokens": 1,
+		"messages":   []map[string]any{{"role": "user", "content": "ping"}},
+	})
+	if err != nil {
+		return fmt.Errorf("重测请求体构造失败: %w", err)
+	}
+	rc, _, raw, err := c.ChatStream(a, body)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	first := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		n, _ := rc.Read(buf)
+		first <- buf[:n]
+	}()
+	select {
+	case chunk := <-first:
+		if len(chunk) == 0 {
+			return ErrEmptyStream
+		}
+		return firstFrameError(chunk, raw)
+	case <-time.After(ProbeTimeout):
+		return &Error{Kind: ErrGateway, Status: 504, Msg: "重测超时：首帧未到"}
+	}
+}
+
+// firstFrameError 判首帧是不是错误信封（是 → 分类后的错误；不是 → nil）。
+//
+// 不拿整段原文去跑 Classify：正常回答里也可能出现 "subscription" 之类的词，
+// 那样会把一次成功的调用记成额度不足。只认结构字段 statusCodeValue 与排队码。
+func firstFrameError(chunk, raw []byte) error {
+	text := string(chunk)
+	if match := statusCodePattern.FindStringSubmatch(text); len(match) == 2 {
+		if code, convErr := strconv.Atoi(match[1]); convErr == nil && code != 200 {
+			return &Error{Kind: Classify(code, text), Status: code,
+				Msg: "上游首帧即错误（" + match[1] + "）：" + truncate(text, 160)}
+		}
+	}
+	if rawHasCode(text, queueCode) || messageHasQueue(text) {
+		return &Error{Kind: ErrBusy, Status: 429, Msg: "上游排队中：" + truncate(text, 160)}
+	}
+	return nil
+}
+
+var statusCodePattern = regexp.MustCompile(`"statusCodeValue"\s*:\s*(\d+)`)
+
 // doChat 向一个端点发一次已签名的推理请求。
 func (c *Client) doChat(base string, plan *chatPlan) (io.ReadCloser, int, []byte, error) {
 	req, err := http.NewRequest(http.MethodPost, ChatURL(base), bytes.NewReader(plan.body))
@@ -679,7 +765,7 @@ func (c *Client) buildChatPlan(a *auth.Auth, body []byte) (*chatPlan, error) {
 	}
 	encoded := encodeBody(raw)
 	url := ChatURL(c.inferenceBase(a.Realm(), a.JWT()))
-	headers, err := buildAuthHeaders(encoded, url, a)
+	headers, err := c.buildAuthHeaders(encoded, url, a)
 	if err != nil {
 		return nil, &Error{Kind: ErrServer, Status: 500, Msg: err.Error()}
 	}

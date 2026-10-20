@@ -21,6 +21,15 @@ func newTestPanel(t *testing.T) (*Panel, *upstream.Client, *pool.Pool) {
 	t.Helper()
 	var polls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 重测只读首帧：给一个 200 信封 + 一段内容就算「上游接单了」。
+		if strings.HasSuffix(r.URL.Path, "/agent_chat_generation") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			chunk, _ := json.Marshal(map[string]any{"statusCodeValue": 200,
+				"body": `{"choices":[{"delta":{"content":"pong"}}]}`})
+			_, _ = io.WriteString(w, "data: "+string(chunk)+"\n\n")
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
 		switch r.URL.Path {
 		case "/algo/api/v2/model/list":
 			_, _ = io.WriteString(w, `{"chat":[{"key":"qmodel_38max","display_name":"Qwen3.8-Max","is_reasoning":true,"enable":true}]}`)
@@ -220,5 +229,98 @@ func TestLoginRefreshRejectsGarbage(t *testing.T) {
 	code, _ := call(t, pn, http.MethodPost, "/panel/api/login/refresh", `{"refresh_token":""}`)
 	if code != http.StatusBadRequest {
 		t.Errorf("空 refreshToken 应 400，得到 %d", code)
+	}
+}
+
+// TestModelsAvailability 钉住 E：目录里的每条模型都要带「当前池里该地区有没有可用号」。
+// 本用例的号在国际版，所以 global 条目 usable、cn 条目不可用——这正是用户要能一眼看出的。
+func TestModelsAvailability(t *testing.T) {
+	pn, up, p := newTestPanel(t)
+	if _, err := up.RefreshModels(p.Peek(), true); err != nil {
+		t.Fatalf("拉模型目录失败: %v", err)
+	}
+	code, body := call(t, pn, http.MethodGet, "/panel/api/models", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	avail := body["availability"].(map[string]any)
+	if avail["global"].(float64) != 1 {
+		t.Errorf("availability[global] = %v，want 1", avail["global"])
+	}
+	if _, ok := avail["cn"]; ok {
+		t.Errorf("没有国内号时不该出现 cn 计数：%v", avail)
+	}
+	entries := body["data"].([]any)
+	if len(entries) == 0 {
+		t.Fatalf("模型列表为空")
+	}
+	for _, raw := range entries {
+		entry := raw.(map[string]any)
+		id := entry["id"].(string)
+		want := strings.HasPrefix(id, "global:")
+		if entry["usable"] != want {
+			t.Errorf("%s usable = %v，want %v", id, entry["usable"], want)
+		}
+	}
+	// 身份要能核对：目录条数受「身份 + 版本」闸门控制，模型少了先看这一项。
+	identity := body["identity"].(map[string]any)
+	if identity["cosy_version"] == "" || identity["client_type"] == "" {
+		t.Errorf("identity 不完整：%v", identity)
+	}
+}
+
+// TestOverviewDiagnosis 钉住 H1：首屏要直说「为什么接不了单」，而不是只给一个红点。
+// 诊断是纯本地推断（零网络），所以冷却中的号一定会带一条原因。
+func TestOverviewDiagnosis(t *testing.T) {
+	pn, _, p := newTestPanel(t)
+	p.Cooldown("u-1", pool.CoolPlan, time.Hour, "额度不足/套餐不支持")
+	_, body := call(t, pn, http.MethodGet, "/panel/api/overview", "")
+	row := body["accounts"].([]any)[0].(map[string]any)
+	diag, _ := row["diagnosis"].([]any)
+	if len(diag) == 0 {
+		t.Fatalf("冷却中的号没有诊断结论：%v", row)
+	}
+	if !strings.Contains(diag[0].(string), "冷却中") || !strings.Contains(diag[0].(string), "额度不足") {
+		t.Errorf("诊断结论没说清原因：%v", diag)
+	}
+}
+
+// TestAccountProbeClearsCooldown 钉住 H2 的两个动作语义不同：
+//   - 重测（probe）：真发一次请求，成功才清标记；
+//   - 重置（clear-cooldown）：不发请求，直接清显示。
+//
+// 这里覆盖「重测成功 → 冷却被清掉」这条主路径。
+func TestAccountProbeClearsCooldown(t *testing.T) {
+	pn, up, p := newTestPanel(t)
+	p.Cooldown("u-1", pool.CoolSoft, time.Hour, "soft rate limit")
+	code, body := call(t, pn, http.MethodPost, "/panel/api/accounts/u-1/probe", "{}")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d body=%v", code, body)
+	}
+	if body["ok"] != true {
+		t.Fatalf("重测应通过：%v", body)
+	}
+	if body["cleared"] != true {
+		t.Errorf("通过后应解除冷却：%v", body)
+	}
+	// 再来一次：这次本来就没标记，cleared 必须是 false（否则面板会喊「已解除冷却」，
+	// 而用户根本没看到过冷却）。
+	_, again := call(t, pn, http.MethodPost, "/panel/api/accounts/u-1/probe", "{}")
+	if again["ok"] != true || again["cleared"] != false {
+		t.Errorf("无标记时重测应 ok=true/cleared=false：%v", again)
+	}
+	st, _ := p.Status("u-1")
+	if st.Cooling {
+		t.Errorf("重测通过后仍在冷却：%+v", st)
+	}
+	// 重测必须用**该地区**的模型：拿国际号打国内模型会必然 4001，测了等于没测。
+	realmModels := map[string]bool{}
+	for _, mi := range up.Catalog() {
+		if mi.Realm == auth.RealmGlobal {
+			realmModels[mi.ID] = true
+		}
+	}
+	if !realmModels[body["model"].(string)] {
+		t.Errorf("重测模型 = %v，不在国际版目录里：%v", body["model"], realmModels)
 	}
 }

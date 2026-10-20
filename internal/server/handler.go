@@ -242,25 +242,32 @@ func (h *Handler) modelList() []map[string]any {
 			"efforts":           mi.Efforts,
 			"vision":            mi.VL,
 			"credits":           mi.Credits,
-			// free：上游把价倍率压到 0 的限免模型。独立字段是因为 credits 的形态
+			// free：限免（上游 is_free 或价倍率 0）。独立字段是因为 credits 的形态
 			// （"x0 credits"）不好给客户端判断，而限免是「现在白用」的强信号。
 			"free": mi.Free,
 		}
-		if mi.OffPeakWindow != "" {
-			entry["off_peak"] = offPeakOf(mi)
+		if mi.OriginalFactor != "" || mi.PromoWindow != "" {
+			entry["promo"] = promoOf(mi)
 		}
 		out = append(out, entry)
 	}
 	return out
 }
 
-// offPeakOf 是错峰折扣的对外形状：倍率、时段、上游当前是否在窗口内。
-func offPeakOf(mi upstream.ModelInfo) map[string]any {
-	return map[string]any{
-		"factor": "x" + mi.OffPeakFactor,
-		"window": mi.OffPeakWindow,
-		"active": mi.OffPeakActive,
+// promoOf 是限时促销的对外形状（注意不是「谷时价」）：当前价恒为 credit_rate，
+// 这里只带划线原价与时段，供面板把原价划掉、标出窗口。上游没促销就不发这个字段。
+func promoOf(mi upstream.ModelInfo) map[string]any {
+	promo := map[string]any{"active": mi.PromoActive}
+	if mi.OriginalFactor != "" {
+		promo["original_factor"] = "x" + mi.OriginalFactor
 	}
+	if mi.PromoWindow != "" {
+		promo["window"] = mi.PromoWindow
+	}
+	if mi.PromoDiscount != "" {
+		promo["discount_factor"] = mi.PromoDiscount
+	}
+	return promo
 }
 
 // Models 是面板模型页的载荷：每条带 realm 前缀与页面需要的展示字段（能力胶囊、
@@ -281,10 +288,14 @@ func (h *Handler) Models() []map[string]any {
 			"upstream_key":            mi.UpstreamKey,
 			"credits":                 mi.Credits,
 			"free":                    mi.Free,
-			"thinking":                map[bool]string{true: "enabled", false: "disabled"}[mi.Reasoning],
+			// 划线原价（促销前/折扣前）：面板把 0.00× 后面的 0.10× 划掉就靠它。
+			"original_factor":   mi.OriginalFactor,
+			"thinking":          map[bool]string{true: "enabled", false: "disabled"}[mi.Reasoning],
+			"default_effort":    mi.DefaultEffort,
+			"supports_disabled": mi.SupportsDisabled,
 		}
-		if mi.OffPeakWindow != "" {
-			entry["off_peak"] = offPeakOf(mi)
+		if mi.OriginalFactor != "" || mi.PromoWindow != "" {
+			entry["promo"] = promoOf(mi)
 		}
 		if mi.Reasoning {
 			entry["capability"] = "reasoning_model"

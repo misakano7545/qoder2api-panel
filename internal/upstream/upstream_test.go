@@ -218,6 +218,38 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+// TestClassifyBillingCodes 钉住额度判据的两条腿：业务码（110/112）与文案
+// （pricingUrl 等）。上游换一个码值时，只认文案的实现会把它当普通 4xx ——
+// 既不换号也不冷却，用户只看到反复失败；只认码值时反过来会漏掉新版文案。
+// 两条腿必须同时成立，任何一条被删掉这里都会红。
+func TestClassifyBillingCodes(t *testing.T) {
+	// 码值腿：110 与 112 都见真实报文；其余同族码一并覆盖，防止有人「清理」表。
+	for _, code := range []string{"110", "112", "113", "119", "122"} {
+		if got := Classify(400, `{"code":"`+code+`"}`); got != ErrPlanLimit {
+			t.Errorf("业务码 %s 应判额度不足，得到 %v", code, got)
+		}
+	}
+	// 文案腿：新版上游可能只给结构字段/文案，不带上面的码值。
+	for _, body := range []string{
+		`{"pricingUrl":"https://qoder.com/pricing"}`,
+		`{"message":"insufficient credits"}`,
+		`{"error":{"message":"no_quota"}}`,
+		`please upgrade your subscription`,
+	} {
+		if got := Classify(400, body); got != ErrPlanLimit {
+			t.Errorf("文案 %q 应判额度不足，得到 %v", body, got)
+		}
+	}
+	// 传输层优先：500 正文里出现 quota 字样仍按服务端错误算，不能记成额度不足。
+	if got := Classify(500, `{"message":"quota backend timeout"}`); got != ErrServer {
+		t.Errorf("5xx 里的 quota 文案应仍是 ErrServer，得到 %v", got)
+	}
+	// 排队码优先于额度：10605 是「等会儿再来」，不是没额度。
+	if got := Classify(403, `{"code":"10605","message":"isQueued"}`); got != ErrBusy {
+		t.Errorf("10605 应判排队，得到 %v", got)
+	}
+}
+
 func TestResolveModel(t *testing.T) {
 	c := New()
 	for _, name := range []string{"Qwen3.8-Max", "qwen3.8-max", "Qwen 3.8 Max", "qmodel_38max"} {
@@ -512,13 +544,16 @@ func TestOrgPackageUnavailableIgnored(t *testing.T) {
 	}
 }
 
-// 错峰折扣：谷时 = 原价 × 折扣系数（实测 0.5×0.4=0.2），窗口跨零点也要原样带出。
-func TestPromotionOffPeak(t *testing.T) {
+// 促销口径（照官方客户端 yo0()）：当前价恒取 price_factor，划线原价取
+// original_price_factor；促销进行中时原价优先 before_promotion_price_factor。
+// **不做 before × discount 的乘法** —— 0.5×0.4=0.2 只是「谷时推算价」，
+// 官方客户端从不显示它，早先版本把它当价格显示等于报了一个上游没说的数。
+func TestPromotionPricing(t *testing.T) {
 	payload := map[string]any{"chat": []any{map[string]any{
-		"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "price_factor": 0.5,
-		"max_input_tokens": 200000, "enable": true,
+		"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "price_factor": 0.2,
+		"max_input_tokens": 200000, "enable": true, "original_price_factor": 0.5,
 		"promotion": map[string]any{
-			"active": false, "discount_factor": 0.4, "before_promotion_price_factor": 0.5,
+			"active": true, "discount_factor": 0.4, "before_promotion_price_factor": 0.5,
 			"window_start": "22:00", "window_end": "08:00",
 		},
 	}}}
@@ -527,15 +562,32 @@ func TestPromotionOffPeak(t *testing.T) {
 		t.Fatalf("应解析出 1 条，得到 %d", len(got))
 	}
 	m := got[0]
-	if m.OffPeakFactor != "0.2" || m.OffPeakWindow != "22:00-08:00" || m.OffPeakActive {
-		t.Fatalf("错峰字段错：%+v", m)
+	if m.Credits != "x0.2 credits" {
+		t.Errorf("当前价应恒取 price_factor：credits=%q", m.Credits)
+	}
+	if m.OriginalFactor != "0.5" {
+		t.Errorf("划线原价取 before_promotion_price_factor：%q", m.OriginalFactor)
+	}
+	if m.PromoWindow != "22:00-08:00" || !m.PromoActive || m.PromoDiscount != "0.4" {
+		t.Errorf("促销元信息错：%+v", m)
 	}
 
-	// 没有 promotion 的模型不能凭空长出谷时价。
+	// 促销未进行：原价取 original_price_factor，窗口照带（时段本身仍是事实）。
+	inactive := parseCatalog(map[string]any{"chat": []any{map[string]any{
+		"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "price_factor": 0.5,
+		"original_price_factor": 0.5,
+		"promotion": map[string]any{"active": false, "discount_factor": 0.4, "before_promotion_price_factor": 0.5,
+			"window_start": "22:00", "window_end": "08:00"},
+	}}}, auth.RealmCN)
+	if len(inactive) != 1 || inactive[0].OriginalFactor != "0.5" || inactive[0].PromoActive {
+		t.Fatalf("未进行时原价应取 original_price_factor：%+v", inactive)
+	}
+
+	// 没有 promotion 的模型不能凭空长出促销字段。
 	plain := parseCatalog(map[string]any{"chat": []any{map[string]any{
 		"key": "qfmodel", "display_name": "Qwen3.8-Flash", "price_factor": 0.1,
 	}}}, auth.RealmCN)
-	if len(plain) != 1 || plain[0].OffPeakWindow != "" {
+	if len(plain) != 1 || plain[0].PromoWindow != "" || plain[0].OriginalFactor != "" {
 		t.Fatalf("无 promotion 时应留空：%+v", plain)
 	}
 }

@@ -18,13 +18,16 @@ type authState = auth.Auth
 // encodeBody / buildAuthHeaders 是 cosy 的薄包装，签名只在本包出现一次。
 func encodeBody(payload []byte) []byte { return cosy.EncodeBody(payload) }
 
-func buildAuthHeaders(body []byte, rawURL string, a *authState) (map[string]string, error) {
+// buildAuthHeaders 是 Client 的方法而不是自由函数：COSY 版本要跟着配置走
+// （见 cosy.Identity.Version），自由函数读不到 Client 上的那份设置。
+func (c *Client) buildAuthHeaders(body []byte, rawURL string, a *authState) (map[string]string, error) {
 	return cosy.BuildAuthHeaders(body, rawURL, cosy.Identity{
 		UserID:    a.UID,
 		AuthToken: a.JWT(),
 		Name:      a.Nickname,
 		Email:     a.Email,
 		MachineID: a.MachineIDValue(),
+		Version:   c.cosyVersion(),
 	})
 }
 

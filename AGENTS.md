@@ -19,3 +19,10 @@ git push origin "v$VERSION"
 ```
 
 本地构建不注入，面板显示 `dev`。同一分钟再发才会撞号。
+
+# 协议事实
+
+上游（Qoder）的协议结论记在 [`docs/protocol-facts.md`](docs/protocol-facts.md)：
+每条事实标证据等级（A 官方产物/抓包、B 文档或报文语义、C 兄弟实现推断），并写下
+守它的用例名。改协议判据前先读那张表——那里写着「这条凭什么成立」和「谁在守它」。
+

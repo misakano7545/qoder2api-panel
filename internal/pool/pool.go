@@ -413,11 +413,14 @@ func (p *Pool) pickLocked(tried map[string]bool, realm string) *entry {
 	}
 
 	// 快过期优先：窗口内到期的积分先花掉，避免过期作废。credits 为 0 的号没有可花的
-	// 积分，不算候选（否则会把空号排到前面）。
+	// 积分，不算候选（否则会把空号排到前面）。判据里的两个 0 分别是
+	// creditsUnknown / expireUnknown（见常量注释），**不是**「不可用」：
+	// 只是不享受临期加成，仍然参与抽签。
 	if p.lim.ExpiringSoon > 0 {
 		var expiring []*entry
 		for _, e := range cands {
-			if e.credits > 0 && e.expire > 0 && time.Unix(e.expire, 0).Sub(now) <= p.lim.ExpiringSoon {
+			if e.credits > creditsUnknown && e.expire > expireUnknown &&
+				time.Unix(e.expire, 0).Sub(now) <= p.lim.ExpiringSoon {
 				expiring = append(expiring, e)
 			}
 		}
@@ -427,6 +430,20 @@ func (p *Pool) pickLocked(tried map[string]bool, realm string) *entry {
 	}
 	return p.drawLocked(cands, now)
 }
+
+// 选号里的两个哨兵值必须与「不可用」分开（借 dsh-providers-hub 的实战缺陷：
+// 那边拿同一个 Infinity 初值兼作「还没选中任何 provider」，于是当所有账号都只有
+// 永久积分时循环一次都不赋值 ⇒ 返回 undefined ⇒ 用户看到「没有任何已登录账号」，
+// 而账号其实全好）。
+//
+//	creditsUnknown —— 余额还没查到（不是「零余额」）：基线权重 1.0，参与抽签；
+//	expireUnknown  —— 没有到期信息（不是「已过期」）：参与抽签，只是不享受临期加成。
+//
+// 「不可用」的唯一判据是 healthy()（禁用 / 冷却），与上面两个哨兵无关。
+const (
+	creditsUnknown int64 = 0
+	expireUnknown  int64 = 0
+)
 
 // minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非候选全部刚被用过）。
 // 没有它，同一瞬间涌入的并发请求会各自独立抽签、全部落到权重最高的那个号上——

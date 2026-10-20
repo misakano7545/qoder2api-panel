@@ -225,7 +225,13 @@ func ModelListURL(base string) string { return joinURL(base, EpModelList) }
 const (
 	queueCode = "10605"
 	authCode  = "105"
-	// quotaCodes 是一族「额度/套餐不支持」的业务码。
+	// quotaCodesCsv 是一族「额度/套餐不支持」的业务码。
+	//
+	// 110 与 112 是最常出现的两个（112 见 dsh-providers-hub 的
+	// BILLING_BUSINESS_CODES，110 有客户端产物取证）。这条链的教训是：
+	// **码值表与文案判断缺一即复发** —— 上游换一个码值，只认文案的实现会
+	// 静默把「额度不足」当成普通 4xx，于是既不换号、也不冷却，用户只看到
+	// 反复失败。所以两边都要保留，改这里必须连带跑 TestClassifyBillingCodes。
 	quotaCodesCsv = "110,112,113,114,115,116,117,118,119,122"
 )
 

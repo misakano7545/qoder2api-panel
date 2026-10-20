@@ -261,6 +261,10 @@ function renderAccounts(list) {
     if (!a.disabled && a.checkin_cooling) {
       st.push(tag('warn', '签到冷却', a.checkin_reason || '签到失败，已暂停自动签到'));
     }
+    // 诊断：服务端按池状态推出来的「为什么接不了单」，只在有问题时才出现。
+    // 与「重测」分工：这里解释现状（零网络），重测真发一次请求推翻过期标记。
+    const diag = (a.diagnosis && a.diagnosis.length)
+      ? '<div class="id" title="' + esc(a.diagnosis.join('；')) + '">' + esc(a.diagnosis[0]) + '</div>' : '';
     // 今日签到状态：只读查询过一次才显示（按需拉取，不点就没标记，也没额外上游请求）。
     const cs = checkinState[String(a.uid)];
     if (!a.disabled && cs === true) st.push(tag('mute', '今日已签'));
@@ -277,13 +281,18 @@ function renderAccounts(list) {
       // 换指纹 = 换 cosy-machineid（设备维度风控）。当前值直接挂 tooltip。
       '<button class="xs" data-a="rotate-device" data-u="' + esc(a.uid) +
         '" title="换一套设备指纹（cosy-machineid）；当前 ' + esc(a.machine_id || '—') + '">换指纹</button>'];
-    if (a.cooling) acts.push('<button class="xs" data-a="clear-cooldown" data-u="' + esc(a.uid) + '">解除冷却</button>');
+    // 重测 = 真发一次最小对话（会消耗一次调用），成功才清标记；停用/冷却中的号也能测。
+    acts.push('<button class="xs" data-a="probe" data-u="' + esc(a.uid) +
+      '" title="真实发一次最小请求（max_tokens=1，会计一次调用）；通过才解除冷却标记">重测</button>');
+    // 重置 = 不发任何请求，只把面板上的冷却显示清掉（用于用户已知额度已恢复）。
+    if (a.cooling) acts.push('<button class="xs" data-a="clear-cooldown" data-u="' + esc(a.uid) +
+      '" title="只清面板标记，不发请求；要用真实结果判断请点「重测」">重置标记</button>');
     if (a.disabled) acts.push('<button class="xs" data-a="enable" data-u="' + esc(a.uid) + '">启用</button>');
     if (!a.disabled) acts.push('<button class="xs danger" data-a="disable" data-u="' + esc(a.uid) + '">禁用</button>');
     acts.push('<button class="xs danger" data-a="remove" data-u="' + esc(a.uid) + '">移除</button>');
     return '<tr class="' + cls + '"><td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (a.realm !== 'cn' ? '<span class="tag mute">国际</span> ' : '') + esc(a.nickname || a.uid) + '</div><div class="id">' + esc(a.uid) + '</div></td>' +
-      '<td>' + st.join(' ') + '</td>' +
+      '<td>' + st.join(' ') + diag + '</td>' +
       '<td class="cred" title="' + esc(credTitle(a)) + '">' + credCell(a) + '</td>' +
       '<td>' + expCell(a.expire) + '</td>' +
       '<td>' + expCell(a.token_expires_at) + '</td>' +
@@ -383,31 +392,42 @@ async function loadOverview(quiet) {
 }
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
-/* 思考列：上游这条接口**没有** low/medium/high 档位列表（2026-09 实测 15 个官方模型：
-   kimi 三兄弟给 model_extra_config.Thinking.Type=enabled，Doubao 三条给 reasoning_effort_config={"support_thinking":false}，
-   其余 12 条两个字段都没有；顶层再无其它 effort/thinking 键）。
-   所以不编档位：有什么说什么，原值塞进 title，什么都没有就明说「上游未给」。 */
+/* 思考列：开关（enabled/disabled）与档位（none/low/medium/high/xhigh/max）是两件事，
+   照上游原值分别显示，不互相换算。档位在服务端已按官方白名单归一（对象/数组/字符串
+   三种下发形态都收敛成同一份列表），默认档位来自 default_effort，能否关掉看
+   supports_disabled。 */
 function thinkCell(m) {
   const raw = [];
   if (m.thinking) raw.push('thinking=' + m.thinking);
-  if (m.reasoning_effort_config) raw.push(m.reasoning_effort_config);
+  if (m.reasoning_effort_config) raw.push('efforts=' + m.reasoning_effort_config);
+  if (m.default_effort) raw.push('default_effort=' + m.default_effort);
+  if (m.supports_disabled) raw.push('supports_disabled=true');
   if (!raw.length) {
-    return '<span class="tag mute" title="上游没给思考字段，也没有 low/medium/high 档位列表">上游未给</span>';
+    return '<span class="tag mute" title="上游没给思考字段，也没有档位列表">上游未给</span>';
   }
   const sw = m.reasoning_effort_config ? switchLabel(m.reasoning_effort_config) : '';
   // 长文案（support_thinking 那句每行都一样）只进 title：一列 92 行重复同一句话是纯噪音。
   const tip = '上游原值：' + raw.join(' · ') + (sw ? ' · ' + sw : '');
-  // 档位（medium/HIGH/low）与开关（enabled/disabled）是两回事：照原值显示，不互相换算。
   const t = String(m.thinking || '');
   const label = t === 'enabled' ? '思考：开' : t === 'disabled' ? '思考：关' : t;
-  // 只有开关没有档位（26 条 thinking 缺省 + support_thinking=false）：上游明确说不能思考，
-  // 就照实标一句；形状不认识时留破折号，不猜。
+  // 只有开关没有档位（support_thinking=false）：上游明确说不能思考，就照实标一句；
+  // 形状不认识时留破折号，不猜。
   if (!label) {
     if (sw.indexOf('不支持') === 0) return '<span class="tag mute" title="' + esc(tip) + '">不支持思考</span>';
     return '<span style="color:var(--ink-3)" title="' + esc(tip) + '">—</span>';
   }
-  return '<span class="tag ' + (t === 'disabled' ? 'mute' : 'ok') +
+  let html = '<span class="tag ' + (t === 'disabled' ? 'mute' : 'ok') +
     '" title="' + esc(tip) + '">' + esc(label) + '</span>';
+  // 档位挂第二行：「档位 none/low/medium/high/xhigh/max · 默认 medium」。
+  const efforts = String(m.reasoning_effort_config || '');
+  if (efforts) {
+    html += '<div class="id">档位 ' + esc(efforts) +
+      (m.default_effort ? ' · 默认 ' + esc(m.default_effort) : '') + '</div>';
+  }
+  if (m.supports_disabled) {
+    html += ' ' + tag('mute', '可关', '可以把思考显式关掉（thinking_config.disabled）');
+  }
+  return html;
 }
 /* support_thinking:true/false → 支持/不支持；形状不认识就原样显示，不猜。
    上游哪天在这段 JSON 里加了档位列表之类的其它键，就把它原样补在后面，别被这个标签吞掉。 */
@@ -456,13 +476,33 @@ function mdSortList(list, f) {
   else if (f.sort === 'name') out.sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
   return out;
 }
+// rateCell 倍率单元格：当前价 + 划线原价 +（有促销时的）时段说明。
+// 原价与当前价相同时不划线——那不是折扣，只是把同一个数写了两遍。
+function rateCell(m) {
+  if (m.credit_rate == null) return '—';
+  let html = '<b>' + m.credit_rate.toFixed(2) + '×</b>';
+  const orig = m.original_factor ? String(m.original_factor).replace(/^x/, '') : '';
+  if (orig && Number(orig) !== Number(m.credit_rate)) {
+    html += ' <s style="opacity:.45" title="促销/折扣前倍率（上游 original_price_factor）">' + esc(orig) + '×</s>';
+  }
+  const promo = m.promo || null;
+  if (promo && (promo.window || promo.active)) {
+    html += '<div class="id">' + (promo.active ? '促销中' : '促销') +
+      (promo.window ? ' ' + esc(promo.window) : '') + '</div>';
+  }
+  return html;
+}
 // mdCaps 能力胶囊（挂在模型名下那排）：渲染与搜索共用一份定义，
 // 否则搜「视觉」搜不到——那一列已经不显示上游枚举了。
 function mdCaps(m) {
   const out = [];
   // 限免排最前：它是「现在白用」的强信号，比推理/视觉更值得先看到。
-  // 判据是 price_factor 本身为 0（promotion 块是错峰折扣，不是限免），见 upstream.ModelInfo.Free。
-  if (m.free) out.push(['free', '限免', '上游价倍率 0.0×：现在调用不扣积分（促销结束后上游会恢复原倍率）']);
+  // 判据是上游的 is_free 或价倍率 0；原价由上游 original_price_factor 下发，
+  // 由倍率列划掉显示，不在这里重复。
+  if (m.free) out.push(['free', '限免', '上游倍率 0.0×：现在调用不扣积分（促销结束后上游会恢复原倍率）']);
+  // 无可用号：目录里有、但当前池里这个地区没有能用的账号——选中它必然失败，
+  // 这比「等它报错再看日志」少一轮。只提示，不禁用（加号或解除冷却后刷新就消失）。
+  if (m.usable === false) out.push(['bad', '无可用号', '当前账号池里没有该地区的可用账号（已禁用/冷却中），调用会失败']);
   if (m.capability === 'reasoning_model') out.push(['ok', '推理']);
   if (m.supports_image) out.push(['warn', '视觉']);
   if (m.max) out.push(['mute', 'Max 上下文']);
@@ -482,11 +522,11 @@ function mdRowHtml(m) {
     (m.name ? '<div class="id">' + esc(m.name) + '</div>' : '') + capHtml + '</td>' +
     '<td>' + thinkCell(m) + '</td>' +
     '<td>' + tag('mute', fnLabel(m.function)) + '</td>' +
-    // 倍率：上游基准积分倍率（客户端选择器同源）。没有就是上游没给，显示 — 而不是编一个数。
+    // 倍率：当前生效价。没有就是上游没给，显示 — 而不是编一个数。
     // 0 是「限免」的合法值，不能用真值判断（否则限免行会掉成 —，用户就看不到限免了）。
-    // 有错峰折扣时在倍率下滑一行谷时价（官方 promotion，谷时 = 原价 × 折扣）。
-    '<td class="num">' + (m.credit_rate != null ? '<b>' + m.credit_rate.toFixed(2) + '×</b>' : '—') +
-      (m.off_peak ? '<div class="id">谷 ' + esc(m.off_peak.factor) + ' ' + esc(m.off_peak.window) + '</div>' : '') + '</td>' +
+    // 口径照官方客户端：当前价恒取 price_factor，划线原价取 original_price_factor，
+    // 不做「原价 × 折扣」的乘法（那个积是谷时推算价，客户端从不显示）。
+    '<td class="num">' + rateCell(m) + '</td>' +
     '<td class="num"' + (m.context_length_max ? ' title="声明口径 max ' + fmtNum(m.context_length_max) + '（本列显示的是 __dev 实际请求口径）"' : '') + '>' +
       (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
     '<td class="num">' + (m.max_output_tokens ? Math.round(m.max_output_tokens / 1000) + 'K' : '—') + '</td></tr>';
@@ -504,9 +544,11 @@ function renderModels() {
   // 限免是个瞬时状态（促销一结束倍率就回原值），所以在计数行也点一下：
   // 「17 个模型 · 2 个限免」，不用逐行找胶囊。
   const freeCount = mdAll.filter(m => m.free).length;
+  const unusable = mdAll.filter(m => m.usable === false).length;
   $('mdCount').textContent = !mdAll.length ? ''
     : (filtered ? '命中 ' + list.length + ' / ' + mdAll.length + ' 个模型'
-      : mdAll.length + ' 个模型') + (freeCount ? ' · ' + freeCount + ' 个限免' : '');
+      : mdAll.length + ' 个模型') + (freeCount ? ' · ' + freeCount + ' 个限免' : '') +
+      (unusable ? ' · ' + unusable + ' 个无可用号' : '');
   $('mdCount').className = filtered ? 'note src-off' : 'note';
 }
 function resetModelFilter() {
@@ -526,7 +568,11 @@ async function loadModels() {
       renderModels();
       return;
     }
-    $('mdNote').textContent = '实时查询上游 · 路由层缓存 1 小时';
+    // 出站身份摆在标题旁：目录条数受「身份 + 版本」闸门控制，模型少了先看这一行，
+    // 再怀疑上游删条目。
+    const idn = d.identity || null;
+    $('mdNote').textContent = '实时查询上游 · 路由层缓存 1 小时' +
+      (idn && idn.cosy_version ? ' · 身份 ' + idn.client_type + '/' + idn.cosy_version : '');
     renderModels();
   } catch (e) {
     mdAll = [];
@@ -1911,6 +1957,7 @@ function checkinMsg(rs, accounts) {
     if (a === 'disable' && !confirm('禁用后该账号不再参与选号，需手动解冻才能恢复。确认禁用？')) return;
     if (a === 'enable' && !confirm('重新启用该账号，让它立刻参与选号？')) return;
     if (a === 'rotate-device' && !confirm('换一套签到/积分设备指纹？服务端按设备记账，换号即重新计数（9074 风控时用它脱开旧标记）。')) return;
+    if (a === 'probe' && !confirm('重测会真实发一次最小对话（max_tokens=1），消耗一次调用；通过才会解除冷却标记。继续？')) return;
     // 凭证预览是只读 GET（服务端只回 token 前缀与长度），不走下面那条 POST 通用路径。
     if (a === 'cred') {
       try {
@@ -1933,7 +1980,11 @@ function checkinMsg(rs, accounts) {
             ? '，已用 ' + fmtUSD(acc.used_usd || 0) + ' / 额度 ' + fmtUSD(acc.limit_usd || 0)
             : '，积分包 ' + acc.credits + (acc.credits_total ? '/' + acc.credits_total : ''))
           : ''), 'ok');
-      } else if (a === 'clear-cooldown') toast('已解除冷却', 'ok');
+      } else if (a === 'probe') {
+        // 服务端总是回 200（失败也是 ok:false），这样「失败原因」能原样带回来。
+        if (r.ok) toast('重测通过（' + r.model + '）' + (r.cleared ? '，已解除冷却标记' : ''), 'ok');
+        else toast('重测失败：' + (r.error || '上游未返回原因') + '（标记保留）', 'err');
+      } else if (a === 'clear-cooldown') toast('已清掉冷却标记（未发请求）', 'ok');
       else if (a === 'refresh') toast('这个号的 token 已换新' + (r.expires_at
         ? '，到期 ' + new Date(r.expires_at * 1000).toLocaleString() : ''), 'ok');
       else if (a === 'rotate-device') toast('已换设备指纹' + (r.machine_id ? '：' + r.machine_id : ''), 'ok');

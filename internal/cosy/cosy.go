@@ -65,6 +65,18 @@ type Identity struct {
 	Name      string
 	Email     string
 	MachineID string
+	// Version 覆盖 COSY 协议版本（空 = 用内置 GatewayVersion）。
+	// 目录条数受「身份 + 版本」闸门控制（cli/5@1.1.69=14 条、app/10@1.1.69=15 条），
+	// 而版本同时参与签名，所以只能从配置里按账号传进来，不能改常量。
+	Version string
+}
+
+// EffectiveVersion 返回实际生效的 COSY 版本（空串回落内置值）。
+func EffectiveVersion(version string) string {
+	if trimmed := strings.TrimSpace(version); trimmed != "" {
+		return trimmed
+	}
+	return GatewayVersion
 }
 
 // EncodeBody 实现上游带 Encode=1 时的请求体编码：base64 → 尾/中/首重排 →
@@ -158,8 +170,9 @@ func BuildAuthHeaders(body []byte, rawURL string, id Identity) (map[string]strin
 	}
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 
+	version := EffectiveVersion(id.Version)
 	payloadSrc := `{"version":"v1","requestId":"` + requestID +
-		`","info":"` + info + `","cosyVersion":"` + GatewayVersion + `","ideVersion":""}`
+		`","info":"` + info + `","cosyVersion":"` + version + `","ideVersion":""}`
 	payload := base64.StdEncoding.EncodeToString([]byte(payloadSrc))
 
 	sigPath, err := SignaturePath(rawURL)
@@ -173,16 +186,16 @@ func BuildAuthHeaders(body []byte, rawURL string, id Identity) (map[string]strin
 	bodyHash := md5Hex(body)
 
 	return map[string]string{
-		"Authorization":          "Bearer COSY." + payload + "." + signature,
-		"Cosy-Key":               cosyKey,
-		"Cosy-User":              id.UserID,
-		"Cosy-Date":              timestamp,
-		"Cosy-Version":           GatewayVersion,
-		"Cosy-Machineid":         id.MachineID,
-		"Cosy-Machinetoken":      id.MachineID,
-		"Cosy-Machinetype":       machineType,
-		"Cosy-Machineos":         MachineOS(),
-		"Cosy-Clienttype":        ClientType,
+		"Authorization":     "Bearer COSY." + payload + "." + signature,
+		"Cosy-Key":          cosyKey,
+		"Cosy-User":         id.UserID,
+		"Cosy-Date":         timestamp,
+		"Cosy-Version":      version,
+		"Cosy-Machineid":    id.MachineID,
+		"Cosy-Machinetoken": id.MachineID,
+		"Cosy-Machinetype":  machineType,
+		"Cosy-Machineos":    MachineOS(),
+		"Cosy-Clienttype":   ClientType,
 		// 实测 Cosy-ClientIp 装的是设备指纹 uuid，不是回环地址。
 		"Cosy-Clientip":          id.MachineID,
 		"Cosy-Business-Product":  BusinessProduct,

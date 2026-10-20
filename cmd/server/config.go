@@ -64,7 +64,10 @@ type Config struct {
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
 		// UserAgent 出站 UA 覆盖；空 = 内置 qoder-local-proxy。
 		UserAgent string `json:"user_agent"`
-		// ClientVersion Qoder 客户端版本段（面板展示客户端身份用）；空 = 内置默认。
+		// ClientVersion 覆盖出站 COSY 版本（空 = 内置默认，实测 1.1.69）。
+		// 它**同时参与签名与目录闸门**：目录条数随「身份 + 版本」变化
+		// （cli/5@1.1.69 拿 14 条、app/10@1.1.69 拿 15 条），所以这是唯一该动的地方，
+		// 不要改 cosy.GatewayVersion 常量。实际生效值在面板「模型」页标题旁可见。
 		ClientVersion string `json:"client_version"`
 		// GatewayHost / GatewayHostCN 显式钉死推理网关基址（热生效）。留空 = 内置常量：
 		// 国际 https://api3.qoder.sh/ 、国内 https://gateway.qoder.com.cn/ 。

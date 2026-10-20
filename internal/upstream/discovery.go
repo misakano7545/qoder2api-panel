@@ -60,7 +60,7 @@ func (c *Client) QueueStatus(a *authState, requestSetID, modelKey string) (Queue
 	query.Set("queueType", QueueTypeOf(modelKey))
 	full := joinURL(c.inferenceBase(a.Realm(), a.JWT()), QueueStatusPath) + "?" + query.Encode()
 
-	headers, err := buildAuthHeaders(nil, full, a)
+	headers, err := c.buildAuthHeaders(nil, full, a)
 	if err != nil {
 		return state, &Error{Kind: ErrServer, Status: 500, Msg: err.Error()}
 	}
@@ -115,9 +115,10 @@ func (c *Client) WaitQueue(a *authState, requestSetID, modelKey string, budget t
 // ExchangeJobToken 用设备令牌（dt-）换取作业令牌（jt-）。
 //
 // 实测（国内版登录链路）：
-//   POST /api/v1/me/jobToken
-//   Authorization: Bearer dt-…
-//   {"clientId":"732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"}
+//
+//	POST /api/v1/me/jobToken
+//	Authorization: Bearer dt-…
+//	{"clientId":"732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"}
 //
 // 返回体里的令牌字段兼容几种常见命名（device_token / job_token / token）。
 func (c *Client) ExchangeJobToken(a *authState, clientID string) (string, error) {

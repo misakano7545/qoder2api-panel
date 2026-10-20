@@ -99,7 +99,11 @@ func New(cfg Config) *Panel {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/enable", p.withAuth(p.accountEnable))
+	// 冷却标记的两个动作用语义严格分开：
+	//   clear-cooldown = 重置（不发请求，只清显示）；
+	//   probe          = 重测（真实发一次最小对话，成功才清标记）。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/clear-cooldown", p.withAuth(p.accountClear))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe", p.withAuth(p.accountProbe))
 	// 换 ug 族设备指纹（手动解 9074 风控标记）。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/rotate-device", p.withAuth(p.accountRotateDevice))
 	p.mux.HandleFunc("POST /panel/api/accounts/rotate-device-all", p.withAuth(p.rotateDeviceAll))
@@ -221,6 +225,71 @@ type accountRow struct {
 	// TokenExpiresAt access token 到期时刻（Unix 秒）。与 Status.Expire（积分包到期）不是
 	// 一回事：那个是「积分什么时候作废」，这个是「这张票还能用多久」。
 	TokenExpiresAt int64 `json:"token_expires_at,omitempty"`
+	// Diagnosis 是「这个号现在为什么接不了单」的人话结论（按优先级排列，可能为空）。
+	// 只由池状态与凭据到期推出来，不发任何网络请求——所以它随时可以在首屏算。
+	Diagnosis []string `json:"diagnosis,omitempty"`
+}
+
+// diagnoseAccount 回答「这个号现在为什么接不了单」，按优先级给结论。
+//
+// 这是纯本地推断（池状态 + 凭据到期），不发网络请求——所以能跟着首屏一起算。
+// 真发请求的验证是「重测」（accountProbe），两者刻意分开：诊断负责解释现状，
+// 重测负责推翻过期的标记。
+func diagnoseAccount(st pool.Status, a *auth.Auth, now time.Time) []string {
+	out := []string{}
+	if st.Disabled {
+		reason := st.Reason
+		if reason == "" {
+			reason = "面板手动禁用"
+		}
+		return append(out, "已禁用："+reason)
+	}
+	if st.Cooling {
+		reason := st.Reason
+		if reason == "" {
+			reason = "未知原因"
+		}
+		if !st.Until.IsZero() && st.Until.After(now) {
+			out = append(out, "冷却中（"+reason+"），还剩 "+humanLeft(st.Until.Sub(now)))
+		} else {
+			out = append(out, "冷却中（"+reason+"）")
+		}
+	}
+	// 额度口径两套不可换算：美元号看 used/limit，积分号看 credits。
+	if st.CreditUnit == upstream.UnitUSD {
+		if st.LimitUSD > 0 && st.UsedUSD >= st.LimitUSD {
+			out = append(out, "美元额度已用尽（免费号只有 $1 额度，用完就停）")
+		}
+	} else if st.CreditsTotal > 0 && st.Credits <= 0 {
+		out = append(out, "积分已用尽（上游会回额度不足）")
+	}
+	if a != nil {
+		// token 提前 30 分钟就算「快过期」：续期有抖动，卡在最后一刻才报错最难查。
+		if exp := a.ExpiresAtValue(); exp > 0 && exp < now.Add(30*time.Minute).UnixMilli() {
+			out = append(out, "登录态已过期或即将过期，先「刷 token」")
+		}
+	}
+	if st.ErrCount > 0 {
+		out = append(out, "熔断连败 "+strconv.Itoa(st.ErrCount)+" 次")
+	}
+	if st.Degraded > 0 {
+		out = append(out, "降权中（不罚号失败 "+strconv.Itoa(st.Degraded)+" 次）")
+	}
+	return out
+}
+
+// humanLeft 把剩余时长压成「12 分钟 / 3 小时 / 2 天」这种一眼能读的字。
+func humanLeft(left time.Duration) string {
+	if left < time.Minute {
+		return "不到 1 分钟"
+	}
+	if left < time.Hour {
+		return strconv.Itoa(int(left.Minutes())) + " 分钟"
+	}
+	if left < 48*time.Hour {
+		return strconv.Itoa(int(left.Hours())) + " 小时"
+	}
+	return strconv.Itoa(int(left.Hours()/24)) + " 天"
 }
 
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) { p.writeOverview(w, nil) }
@@ -243,11 +312,15 @@ func (p *Panel) writeOverview(w http.ResponseWriter, extra map[string]any) {
 	// 用量列与用量视图同源（同一份台账、同一窗口）：另存一份每账号累计计数器早晚会和台账
 	// 对不上，届时运维得先分辨该信哪个。台账为空/无调用时 usage 缺席，前端显示「—」。
 	rows := make([]accountRow, len(list))
+	now := time.Now()
 	for i, st := range list {
 		rows[i] = accountRow{Status: st}
 		if a := p.cfg.Pool.AuthByUID(st.UID); a != nil {
 			rows[i].MachineID = a.MachineIDValue()
 			rows[i].TokenExpiresAt = a.ExpiresAtValue()
+			rows[i].Diagnosis = diagnoseAccount(st, a, now)
+		} else {
+			rows[i].Diagnosis = diagnoseAccount(st, nil, now)
 		}
 	}
 	for _, a := range p.cfg.Usage.Snapshot(usagePanelHours, p.nicks()).ByAccount {
@@ -335,7 +408,46 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			log.Printf("panel: 模型目录刷新失败（用缓存/兜底）: %v", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": p.cfg.Models()})
+	data := p.cfg.Models()
+	// 目录是**按账号**下发的，池里没有该地区的可用号时，这条模型选出来必然失败。
+	// 面板把它标出来（usable=false），比等一次调用报错再看日志省一轮。
+	avail := p.realmAvailability()
+	for _, entry := range data {
+		realm, _ := entry["id"].(string)
+		if idx := strings.IndexByte(realm, ':'); idx > 0 {
+			realm = realm[:idx]
+		}
+		entry["healthy_accounts"] = avail[realm]
+		entry["usable"] = avail[realm] > 0
+	}
+	body := map[string]any{"object": "list", "data": data, "availability": avail}
+	// 出站身份：目录条数受「身份 + 版本」闸门控制，把实际生效的那一版摆出来，
+	// 模型少了能立刻判断是闸门还是上游真删了。
+	if p.cfg.Upstream != nil {
+		ua, version, clientType := p.cfg.Upstream.ClientIdentity()
+		body["identity"] = map[string]any{
+			"user_agent": ua, "cosy_version": version, "client_type": clientType,
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// realmAvailability 每个地区当前有几个能接流的账号（未禁用、未冷却）。
+// 老数据没标地区时按国内算——与请求侧 resolveModel 的裸名兜底保持一致，
+// 两处口径不同就会出现「面板说可用、请求却按另一区选号」。
+func (p *Panel) realmAvailability() map[string]int {
+	counts := map[string]int{}
+	for _, st := range p.cfg.Pool.List() {
+		if st.Disabled || st.Cooling {
+			continue
+		}
+		realm := st.Realm
+		if realm == "" {
+			realm = auth.RealmCN
+		}
+		counts[realm]++
+	}
+	return counts
 }
 
 // packages 返回全部账号的积分包构成，供「积分构成」视图对比。
@@ -680,6 +792,67 @@ func (p *Panel) accountClear(w http.ResponseWriter, r *http.Request) {
 	log.Printf("panel: cooldown cleared uid=%s", uid)
 	st, _ = p.cfg.Pool.Status(uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": st})
+}
+
+// accountProbe 重测一个账号：真实发一次最小对话，成功才清掉冷却/熔断标记。
+//
+// 与「重置」的区别是刻意的：限流标记只是一次 429 的快照，服务端常在它到期前
+// 就提前放行，于是出现「面板说超额、实际能发消息」。重测把这个判断交给上游，
+// 而不是让用户猜。
+//
+// 两条硬约束（照 dsh-providers-hub 的实测教训）：
+//  1. 按 uid 取凭据，**不**走自动选号：重测 A 号不能顺手把 B 号的标记带歪；
+//  2. 禁用/冷却中的号也要能重测 —— 否则「为什么这个号不能用」永远只能靠猜。
+func (p *Panel) accountProbe(w http.ResponseWriter, r *http.Request) {
+	uid, ok := p.uidFrom(w, r)
+	if !ok {
+		return
+	}
+	a := p.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	if p.cfg.Upstream == nil {
+		writeErr(w, http.StatusNotImplemented, "upstream unavailable")
+		return
+	}
+	model := p.probeModel(a.Realm())
+	before, _ := p.cfg.Pool.Status(uid)
+	err := p.cfg.Upstream.Probe(a, model)
+	if err != nil {
+		// 失败**不清标记**：这次实测说明它确实不可用，清了反而误导。
+		log.Printf("panel: 重测失败 uid=%s model=%s: %v", uid, model, err)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": false, "model": model, "error": publicErr(err),
+			"cleared": false,
+		})
+		return
+	}
+	// 真发通了才清：冷却/熔断与 session 失效计数都过期了。
+	// cleared 只报「本来就挂着标记、现在没了」——本来就没标记时回 false，
+	// 否则面板会喊「已解除冷却」，而用户根本没看到过冷却。
+	p.cfg.Pool.ClearCooldown(uid)
+	p.cfg.Pool.ClearSessionDead(uid)
+	cleared := before.Cooling
+	log.Printf("panel: 重测成功 uid=%s model=%s cleared=%v", uid, model, cleared)
+	st, _ := p.cfg.Pool.Status(uid)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "model": model, "cleared": cleared, "account": st,
+	})
+}
+
+// probeModel 选一个该地区当前可用的模型来重测：优先目录里 enable 的，其次 Auto。
+// 用该地区自己的模型，否则会拿国际号去打国内模型（必然 4001，测了等于没测）。
+func (p *Panel) probeModel(realm string) string {
+	if p.cfg.Upstream != nil {
+		for _, mi := range p.cfg.Upstream.Catalog() {
+			if mi.Enabled && mi.Realm == realm {
+				return mi.ID
+			}
+		}
+	}
+	return "Auto"
 }
 
 func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {

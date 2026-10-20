@@ -25,17 +25,29 @@ type ModelInfo struct {
 	VL            bool     `json:"vl"`
 	Enabled       bool     `json:"enabled"`
 	Credits       string   `json:"credits,omitempty"`
-	// OffPeakFactor / OffPeakWindow 是错峰折扣（官方 promotion）：谷时倍率与时段，
-	// 实测 Qwen3.8-Max 峰 0.5 / 谷 0.2、22:00-08:00 UTC+8。无折扣时留空。
-	OffPeakFactor string `json:"off_peak_factor,omitempty"`
-	OffPeakWindow string `json:"off_peak_window,omitempty"`
-	OffPeakActive bool   `json:"off_peak_active,omitempty"`
-	// Free 是「限免」：限时免费不看 promotion 块（那是错峰折扣），判据是上游把
-	// price_factor 本身压到 0（官方口径：Qwen3.8-Flash 0.1× → 0.0×、Efficient
-	// 0.3× → 0.0×）。0 就是「现在不扣积分」；原倍率上游此时不下发，不编一个数回填。
-	Free   bool   `json:"free,omitempty"`
-	Realm  string `json:"realm,omitempty"`
-	Source string `json:"source,omitempty"`
+	// Promo* 是官方 promotion 块（限时促销，与「限免」是两件事）。口径照官方
+	// 客户端 yo0()：**当前价恒取 price_factor**，划线原价取 original_price_factor
+	// （促销进行中优先 before_promotion_price_factor）。不做 before × discount
+	// 的乘法——那个积是「谷时推算价」，官方客户端从不显示它，我们算出来就是在
+	// 报一个上游没说的数。
+	PromoWindow   string `json:"promo_window,omitempty"`
+	PromoActive   bool   `json:"promo_active,omitempty"`
+	PromoDiscount string `json:"promo_discount,omitempty"`
+	// OriginalFactor 是划线原价（折扣前/促销前的倍率），与 Credits（当前价）成对
+	// 出现。限免时上游给 price_factor=0 + is_free=1 + original_price_factor=0.1，
+	// 面板据此把 0.00× 后面那个 0.10× 划掉——原价是上游下发的，不要自己推。
+	OriginalFactor string `json:"original_factor,omitempty"`
+	// Free 是「限免」：显式 is_free 为真，或 price_factor 被压到 0（两种都见过，
+	// 官方口径就是把价倍率从 0.1× 降到 0.0×）。is_free 优先，缺它才反推。
+	Free bool `json:"free,omitempty"`
+	// DefaultEffort 是官方声明的默认思考档位（顶层 default_effort）。
+	DefaultEffort string `json:"default_effort,omitempty"`
+	// SupportsDisabled 表示可以显式关掉思考（thinking_config.disabled /
+	// supports_disabled / supportsDisabled 任一出现）。它与 Reasoning 独立：
+	// is_reasoning=false 只说明「不是推理模型」，不代表不能调档位。
+	SupportsDisabled bool   `json:"supports_disabled,omitempty"`
+	Realm            string `json:"realm,omitempty"`
+	Source           string `json:"source,omitempty"`
 }
 
 // fallbackRow 是静态兜底目录的一行（官方目录拉不到时仍能出模型列表）。
@@ -109,7 +121,7 @@ func makeModel(id, key string, reasoning bool, efforts []string, vl, enabled boo
 		Name:          id,
 		UpstreamKey:   key,
 		Reasoning:     reasoning,
-		Efforts:       efforts,
+		Efforts:       normalizeEfforts(efforts),
 		ContextWindow: DefaultContextWindow,
 		MaxOutput:     MaxOutputTokens,
 		VL:            vl,
@@ -138,7 +150,7 @@ func (c *Client) RefreshModels(a *authState, force bool) (int, error) {
 	url := ModelListURL(c.gatewayBase(realm))
 	// GET 也必须带与签名一致的 {} body，否则上游 403。
 	encoded := encodeBody([]byte("{}"))
-	headers, err := buildAuthHeaders(encoded, url, a)
+	headers, err := c.buildAuthHeaders(encoded, url, a)
 	if err != nil {
 		return 0, err
 	}
@@ -291,7 +303,8 @@ func findModel(models []ModelInfo, wanted string) (ModelInfo, bool) {
 }
 
 // parseCatalog 解析官方目录：{"chat":[{"key","display_name","is_reasoning","is_vl",
-// "enable","max_input_tokens","price_factor","thinking_config":{...},"source"}...]}。
+// "enable","max_input_tokens","price_factor","is_free","original_price_factor",
+// "thinking_config":{...},"available_reasoning_effort":{...},"promotion":{...},"source"}...]}。
 func parseCatalog(payload map[string]any, realm string) []ModelInfo {
 	if message := envelopeError(payload); message != "" {
 		return nil
@@ -317,13 +330,20 @@ func parseCatalog(payload map[string]any, realm string) []ModelInfo {
 			continue
 		}
 		seen[strings.ToLower(id)] = true
-		factor := ""
-		if value := numberOrNil(item["price_factor"]); value != nil && *value >= 0 {
-			factor = trimFloat(*value)
-		}
-		model := makeModel(id, key, truthy(item["is_reasoning"]) || truthy(item["thinking_config"]),
-			effortsOf(item), truthy(item["is_vl"]), truthy(item["enable"]), factor, realm)
+		factor := trimFactor(item["price_factor"])
+		efforts, supportsDisabled, defaultEffort := thinkingOf(item)
+		// 能力口径（真题机实测）：is_reasoning=false 但声明了档位的模型（CN 的
+		// dfmodel）跑 reasoning_effort=low/max 会真的思考，只有 none 才是 0 字符。
+		// 所以「能思考」是三个信号的或：is_reasoning / thinking_config / 有档位。
+		// 不要把 is_reasoning 单独当判据，也不要为了看起来对把它改写成 true。
+		reasoning := truthy(item["is_reasoning"]) || item["thinking_config"] != nil || len(efforts) > 0
+		model := makeModel(id, key, reasoning, efforts, truthy(item["is_vl"]), truthy(item["enable"]), factor, realm)
 		model.Name = display
+		model.DefaultEffort = defaultEffort
+		model.SupportsDisabled = supportsDisabled
+		// 限免：显式 is_free 优先；没有这个字段时才拿 price_factor==0 反推。
+		model.Free = truthy(item["is_free"]) || factorIsZero(factor)
+		model.OriginalFactor = originalFactorOf(item)
 		applyPromotion(&model, item["promotion"])
 		model.Source = orDefault(text(item, "source"), "system")
 		if context := int64Of(item["max_input_tokens"]); context > 0 {
@@ -335,24 +355,39 @@ func parseCatalog(payload map[string]any, realm string) []ModelInfo {
 	return out
 }
 
-// applyPromotion 读官方 promotion 块算谷时倍率：谷时 = 原价 × 折扣系数
-// （before_promotion_price_factor × discount_factor，实测 0.5×0.4=0.2）。
+// originalFactorOf 取划线原价，口径照官方客户端 yo0()：
+// 促销进行中 → before_promotion_price_factor ?? original_price_factor；
+// 否则 → original_price_factor。两者都没有就留空（不猜原价）。
+func originalFactorOf(item map[string]any) string {
+	original := trimFactor(item["original_price_factor"])
+	promo, _ := item["promotion"].(map[string]any)
+	if promo == nil || !truthy(promo["active"]) {
+		return original
+	}
+	if before := trimFactor(promo["before_promotion_price_factor"]); before != "" {
+		return before
+	}
+	return original
+}
+
+// applyPromotion 只记录促销元信息（时段 / 是否进行中 / 折扣系数）。
+//
+// 特别注意**不要**把 before × discount 当价格用：官方客户端当前价恒取
+// price_factor，那个积只是「谷时推算价」。早先版本在这里算 0.5×0.4=0.2 并显示
+// 「谷 x0.2」，等于向上游没这么说的小时数报了一个价。
 func applyPromotion(m *ModelInfo, raw any) {
 	promo, ok := raw.(map[string]any)
 	if !ok {
 		return
 	}
-	base, discount := numberOrNil(promo["before_promotion_price_factor"]), numberOrNil(promo["discount_factor"])
-	if base == nil || discount == nil {
-		return
+	if discount := trimFactor(promo["discount_factor"]); discount != "" {
+		m.PromoDiscount = discount
 	}
+	m.PromoActive = truthy(promo["active"])
 	start, end := text(promo, "window_start"), text(promo, "window_end")
-	if start == "" || end == "" {
-		return
+	if start != "" && end != "" {
+		m.PromoWindow = start + "-" + end
 	}
-	m.OffPeakFactor = trimFloat(*base * *discount)
-	m.OffPeakWindow = start + "-" + end
-	m.OffPeakActive = truthy(promo["active"])
 }
 
 // envelopeError 取上游信封里的业务错误文案（200 或缺失视为正常）。
@@ -368,26 +403,118 @@ func envelopeError(payload map[string]any) string {
 	return fmt.Sprintf("上游返回业务错误 %d: %s", int64(*value), truncate(message, 200))
 }
 
-// effortsOf 取思考档位：thinking_config.enabled.efforts 的键集。
-func effortsOf(item map[string]any) []string {
-	thinking, ok := item["thinking_config"].(map[string]any)
+// effortOrder 是官方认的思考档位（既是白名单也是展示顺序）。
+// 注意**没有** minimal：客户端产物里的合法值只有这六个，多出来的键要丢掉——
+// 否则面板会出现一个用户选了、上游却不认的档位。
+var effortOrder = []string{"none", "low", "medium", "high", "xhigh", "max"}
+
+// thinkingOf 解析思考能力：档位、能否关掉思考、默认档位。
+//
+// 官方 thinking_config.enabled.efforts 有**三种形态**（都实测过）：对象
+// {"low":{},...}、数组 ["low",...]、逗号/空格分隔的字符串。只认对象形态的话，
+// 上游一旦切到另外两种，面板就会静默变成「没有档位」——不报错、也没日志。
+//
+// available_reasoning_effort 本身是**一个 thinking_config 对象**（不是档位表），
+// 只在条目自己既没档位也没 disabled 时用它兜底（两者同时有时以 thinking_config
+// 为准，否则会把兜底值当成真实声明）。
+func thinkingOf(item map[string]any) (efforts []string, supportsDisabled bool, defaultEffort string) {
+	configs := []map[string]any{}
+	if tc, ok := item["thinking_config"].(map[string]any); ok {
+		configs = append(configs, tc)
+	}
+	if len(configs) == 0 {
+		if tc, ok := item["available_reasoning_effort"].(map[string]any); ok {
+			configs = append(configs, tc)
+		}
+	}
+	raw := []string{}
+	for _, tc := range configs {
+		raw = append(raw, effortsOfConfig(tc)...)
+		if _, ok := tc["disabled"]; ok {
+			supportsDisabled = true
+		}
+	}
+	// 蛇形与驼峰都认：官方客户端两个腿都读，只认一个就会漏掉另一种下发形态。
+	if truthy(item["supports_disabled"]) || truthy(item["supportsDisabled"]) {
+		supportsDisabled = true
+	}
+	efforts = normalizeEfforts(raw)
+	// 默认档位是顶层 default_effort；空值或不在白名单里就当没声明（不猜）。
+	defaultEffort = strings.ToLower(strings.TrimSpace(text(item, "default_effort", "defaultEffort")))
+	if !isKnownEffort(defaultEffort) {
+		defaultEffort = ""
+	}
+	return efforts, supportsDisabled, defaultEffort
+}
+
+// effortsOfConfig 从一个 thinking_config 对象里取档位（enabled 三种形态都认）。
+func effortsOfConfig(tc map[string]any) []string {
+	enabled, ok := tc["enabled"]
 	if !ok {
 		return nil
 	}
-	enabled, ok := thinking["enabled"].(map[string]any)
-	if !ok {
-		return nil
+	if field, ok := enabled.(map[string]any); ok {
+		return stringList(field["efforts"])
 	}
-	raw, ok := enabled["efforts"].(map[string]any)
-	if !ok {
-		return nil
+	return stringList(enabled)
+}
+
+// stringList 把「对象键集 / 数组 / 逗号或空格分隔的字符串」统一成字符串切片。
+func stringList(value any) []string {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make([]string, 0, len(typed))
+		for key := range typed {
+			out = append(out, key)
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			if s, ok := raw.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return typed
+	case string:
+		return strings.FieldsFunc(typed, func(r rune) bool {
+			return r == ',' || r == '|' || r == '/' || r == ' ' || r == '	' || r == '\n'
+		})
 	}
-	out := make([]string, 0, len(raw))
-	for key := range raw {
-		out = append(out, key)
+	return nil
+}
+
+// normalizeEfforts 去重、丢掉白名单外的值、按 effortOrder 排序（大小写不敏感）。
+func normalizeEfforts(efforts []string) []string {
+	if len(efforts) == 0 {
+		return []string{}
 	}
-	sort.Strings(out)
+	seen := map[string]bool{}
+	for _, raw := range efforts {
+		for _, part := range stringList(raw) {
+			if key := strings.ToLower(strings.TrimSpace(part)); isKnownEffort(key) {
+				seen[key] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for _, key := range effortOrder {
+		if seen[key] {
+			out = append(out, key)
+		}
+	}
 	return out
+}
+
+func isKnownEffort(effort string) bool {
+	for _, key := range effortOrder {
+		if key == effort {
+			return true
+		}
+	}
+	return false
 }
 
 func numberOrNil(value any) *float64 {
@@ -418,6 +545,16 @@ func int64Of(value any) int64 {
 		return int64(*f)
 	}
 	return 0
+}
+
+// trimFactor 把上游的价倍率字段规整成展示串。缺失或负数返回空串（= 上游没给），
+// 0 会如实返回 "0"——「没给」与「给了 0」必须能区分开，前者不标限免。
+func trimFactor(value any) string {
+	number := numberOrNil(value)
+	if number == nil || *number < 0 {
+		return ""
+	}
+	return trimFloat(*number)
 }
 
 // factorIsZero 判断上游价倍率是否为 0（限免的唯一信号）。只认真的 0：空字符串

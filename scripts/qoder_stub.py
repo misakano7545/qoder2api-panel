@@ -37,7 +37,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _drain(self):
+        """把请求体读掉。上游的 model/list 是 GET 但**必须带** {} body（签名覆盖它），
+        这里不读干净就会留在 keep-alive 连接里，被下一次请求当成请求行解析——实测
+        表现是下一条请求收到 501 `Unsupported method ('$kwmPOST')`，排查方向会被
+        完全带偏（看起来像客户端把方法写坏了）。"""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+
     def do_GET(self):
+        self._drain()
         path = self.path.split("?")[0]
         if path.startswith("/algo/api/v2/model/list"):
             # 签名头必须真的到了，否则这条链路等于没验
