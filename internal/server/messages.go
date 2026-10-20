@@ -1,7 +1,8 @@
 // messages.go Anthropic Messages 入站：POST /v1/messages 与 /messages ↔ 现有 chatCompletions。
 // ponytail: 不存会话；客户端每轮带全量 messages。上游 reasoning_content 无 signature，
 // 作为 thinking 块下发展示；客户端回传的 thinking 块丢弃（不触发签名校验）。
-// top_k / cache_control / context_management / betas / count_tokens 上游 chat 没有对应物，丢掉。
+// top_k / cache_control / context_management / betas 上游 chat 没有对应物，丢掉。
+// count_tokens 单独回答（见 countTokens：按字符粗估，Qoder 没有计数接口）。
 // 内置服务端工具（web_search / code_execution / bash_* …）没有本地执行器，丢掉并在 system 里写明。
 // usage 缓存字段走 SOLO 直报（cache_read_/cache_creation_input_tokens 原样透出），截断映射 refusal。
 package server
@@ -56,6 +57,54 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	rw := &messagesWriter{ResponseWriter: w, stream: peek.Stream}
 	defer rw.finish()
 	h.chatCompletions(rw, r2)
+}
+
+// countTokens 回答 Anthropic 的 POST /v1/messages/count_tokens。Qoder 上游没有计数接口，
+// 按字符数/4 粗估（借鉴 magpie 对无计数能力 provider 的处理）：Claude Code 用它判断上下文
+// 余量，估偏 10% 比 404 让它自己猜要好。shortcut: 字符/4，对中文偏低估，需要精确时接真分词器。
+func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
+	body, err := readCappedBody(r)
+	if errors.Is(err, errBodyTooLarge) {
+		writeAnthropicError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds 8MB limit")
+		return
+	}
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON: "+err.Error())
+		return
+	}
+	// 向上取整：极短 prompt 回 0 会让客户端以为「上下文是空的」。
+	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": (countChars(obj) + 3) / 4})
+}
+
+// countChars 累加请求里的正文字符：跳过结构字段（模型名/类型/角色/id），只算真正占用
+// 上下文的文本——system、消息内容、工具名/描述/参数。
+func countChars(v any) int {
+	switch t := v.(type) {
+	case string:
+		return len([]rune(t))
+	case []any:
+		n := 0
+		for _, it := range t {
+			n += countChars(it)
+		}
+		return n
+	case map[string]any:
+		n := 0
+		for k, it := range t {
+			switch k {
+			case "model", "type", "role", "id", "tool_use_id", "cache_control", "stop_sequences", "metadata":
+				continue
+			}
+			n += countChars(it)
+		}
+		return n
+	}
+	return 0
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, typ, msg string) {

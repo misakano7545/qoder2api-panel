@@ -80,6 +80,7 @@ curl http://127.0.0.1:7866/v1/chat/completions \
 | POST | `/v1/chat/completions` | OpenAI chat（流式 / 非流式） |
 | POST | `/v1/responses` | Codex Responses |
 | POST | `/v1/messages`、`/messages` | Anthropic Messages |
+| POST | `/v1/messages/count_tokens`、`/messages/count_tokens` | 上下文 token 估算（字符/4，本地算，不占额度） |
 | GET | `/v1/models` | 模型目录 |
 | GET | `/status` | 账号池状态（需 key） |
 | GET | `/healthz` | 存活探针（不需要 key） |
