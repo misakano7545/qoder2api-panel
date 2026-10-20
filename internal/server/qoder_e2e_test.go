@@ -32,7 +32,8 @@ func fakeQoderQueue(t *testing.T, chunks []string, queueN int, envelopeQueue boo
 			_, _ = io.WriteString(w, `{"chat":[
 				{"key":"qmodel_38max","display_name":"Qwen3.8-Max","is_reasoning":true,"is_vl":true,"enable":true,"max_input_tokens":200000,"price_factor":0.5,
 				 "thinking_config":{"enabled":{"efforts":{"low":{},"medium":{},"xhigh":{}}}}},
-				{"key":"dfmodel","display_name":"DeepSeek-Flash","is_reasoning":false,"is_vl":false,"enable":true}
+				{"key":"dfmodel","display_name":"DeepSeek-Flash","is_reasoning":false,"is_vl":false,"enable":true},
+				{"key":"qfmodel","display_name":"Qwen3.8-Flash","is_reasoning":true,"is_vl":true,"enable":true,"max_input_tokens":200000,"price_factor":0}
 			]}`)
 			return
 		case r.URL.Path == "/api/v1/userinfo":
@@ -282,6 +283,11 @@ func TestUnknownModelIs400(t *testing.T) {
 func TestModelsList(t *testing.T) {
 	fake := fakeQoder(t, nil)
 	h := newTestHandler(t, fake.URL)
+	// 先真的把目录拉下来：Catalog() 本身不发请求，不刷新就只见静态兜底，
+	// 那样 price_factor 全是兜底表里的数，测不到限免透传。
+	if _, err := h.cfg.Upstream.RefreshModels(h.cfg.Pool.Peek(), true); err != nil {
+		t.Fatalf("拉模型目录失败: %v", err)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 	if rec.Code != http.StatusOK {
@@ -289,20 +295,36 @@ func TestModelsList(t *testing.T) {
 	}
 	var resp struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Credits string `json:"credits"`
+			Free    bool   `json:"free"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
 	foundCN, foundGlobal := false, false
+	free := map[string]bool{}
+	credits := map[string]string{}
 	for _, m := range resp.Data {
+		free[m.ID] = m.Free
+		credits[m.ID] = m.Credits
 		switch m.ID {
 		case "cn:Qwen3.8-Max":
 			foundCN = true
 		case "global:Qwen3.8-Max":
 			foundGlobal = true
 		}
+	}
+	// 限免的判据是上游把价倍率压到 0（官方促销就是这么做的），倍率 0 要在
+	// 契约里表达成 free=true，客户端不必去解析 "x0 credits" 这种展示串。
+	// 只看 global：本测试的号在国际版，国内区没有真目录，走的是静态兜底（0.1×）。
+	if !free["global:Qwen3.8-Flash"] || credits["global:Qwen3.8-Flash"] != "x0 credits" {
+		t.Errorf("price_factor=0 的模型应标成限免：free=%v credits=%q",
+			free["global:Qwen3.8-Flash"], credits["global:Qwen3.8-Flash"])
+	}
+	if free["global:Qwen3.8-Max"] {
+		t.Errorf("倍率 0.5 的模型不该标成限免：%s", rec.Body.String())
 	}
 	if !foundCN || !foundGlobal {
 		t.Errorf("模型列表应把两个地区分开列出（cn=%v global=%v）: %s", foundCN, foundGlobal, rec.Body.String())

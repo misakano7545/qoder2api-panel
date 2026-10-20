@@ -427,6 +427,9 @@ function mdSortList(list, f) {
 // 否则搜「视觉」搜不到——那一列已经不显示上游枚举了。
 function mdCaps(m) {
   const out = [];
+  // 限免排最前：它是「现在白用」的强信号，比推理/视觉更值得先看到。
+  // 判据是 price_factor 本身为 0（promotion 块是错峰折扣，不是限免），见 upstream.ModelInfo.Free。
+  if (m.free) out.push(['free', '限免', '上游价倍率 0.0×：现在调用不扣积分（促销结束后上游会恢复原倍率）']);
   if (m.capability === 'reasoning_model') out.push(['ok', '推理']);
   if (m.supports_image) out.push(['warn', '视觉']);
   if (m.max) out.push(['mute', 'Max 上下文']);
@@ -447,8 +450,9 @@ function mdRowHtml(m) {
     '<td>' + thinkCell(m) + '</td>' +
     '<td>' + tag('mute', fnLabel(m.function)) + '</td>' +
     // 倍率：上游基准积分倍率（客户端选择器同源）。没有就是上游没给，显示 — 而不是编一个数。
+    // 0 是「限免」的合法值，不能用真值判断（否则限免行会掉成 —，用户就看不到限免了）。
     // 有错峰折扣时在倍率下滑一行谷时价（官方 promotion，谷时 = 原价 × 折扣）。
-    '<td class="num">' + (m.credit_rate ? '<b>' + m.credit_rate.toFixed(2) + '×</b>' : '—') +
+    '<td class="num">' + (m.credit_rate != null ? '<b>' + m.credit_rate.toFixed(2) + '×</b>' : '—') +
       (m.off_peak ? '<div class="id">谷 ' + esc(m.off_peak.factor) + ' ' + esc(m.off_peak.window) + '</div>' : '') + '</td>' +
     '<td class="num"' + (m.context_length_max ? ' title="声明口径 max ' + fmtNum(m.context_length_max) + '（本列显示的是 __dev 实际请求口径）"' : '') + '>' +
       (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
@@ -464,9 +468,12 @@ function renderModels() {
     tb.innerHTML = list.map(m => mdRowHtml(m)).join('');
   }
   const filtered = list.length !== mdAll.length;
+  // 限免是个瞬时状态（促销一结束倍率就回原值），所以在计数行也点一下：
+  // 「17 个模型 · 2 个限免」，不用逐行找胶囊。
+  const freeCount = mdAll.filter(m => m.free).length;
   $('mdCount').textContent = !mdAll.length ? ''
-    : filtered ? '命中 ' + list.length + ' / ' + mdAll.length + ' 个模型'
-      : mdAll.length + ' 个模型';
+    : (filtered ? '命中 ' + list.length + ' / ' + mdAll.length + ' 个模型'
+      : mdAll.length + ' 个模型') + (freeCount ? ' · ' + freeCount + ' 个限免' : '');
   $('mdCount').className = filtered ? 'note src-off' : 'note';
 }
 function resetModelFilter() {

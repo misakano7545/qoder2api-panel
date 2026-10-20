@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,8 +30,12 @@ type ModelInfo struct {
 	OffPeakFactor string `json:"off_peak_factor,omitempty"`
 	OffPeakWindow string `json:"off_peak_window,omitempty"`
 	OffPeakActive bool   `json:"off_peak_active,omitempty"`
-	Realm         string `json:"realm,omitempty"`
-	Source        string `json:"source,omitempty"`
+	// Free 是「限免」：限时免费不看 promotion 块（那是错峰折扣），判据是上游把
+	// price_factor 本身压到 0（官方口径：Qwen3.8-Flash 0.1× → 0.0×、Efficient
+	// 0.3× → 0.0×）。0 就是「现在不扣积分」；原倍率上游此时不下发，不编一个数回填。
+	Free   bool   `json:"free,omitempty"`
+	Realm  string `json:"realm,omitempty"`
+	Source string `json:"source,omitempty"`
 }
 
 // fallbackRow 是静态兜底目录的一行（官方目录拉不到时仍能出模型列表）。
@@ -110,6 +115,7 @@ func makeModel(id, key string, reasoning bool, efforts []string, vl, enabled boo
 		VL:            vl,
 		Enabled:       enabled,
 		Credits:       credits,
+		Free:          factorIsZero(factor),
 		Realm:         normalRealm(realm),
 		Source:        "system",
 	}
@@ -412,6 +418,17 @@ func int64Of(value any) int64 {
 		return int64(*f)
 	}
 	return 0
+}
+
+// factorIsZero 判断上游价倍率是否为 0（限免的唯一信号）。只认真的 0：空字符串
+// （上游没给 price_factor）不算 —— 「没给」和「给了 0」是两件事，不能混。
+func factorIsZero(factor string) bool {
+	factor = strings.TrimSpace(factor)
+	if factor == "" {
+		return false
+	}
+	value, err := strconv.ParseFloat(factor, 64)
+	return err == nil && value == 0
 }
 
 func trimFloat(value float64) string {

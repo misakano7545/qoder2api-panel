@@ -242,6 +242,9 @@ func (h *Handler) modelList() []map[string]any {
 			"efforts":           mi.Efforts,
 			"vision":            mi.VL,
 			"credits":           mi.Credits,
+			// free：上游把价倍率压到 0 的限免模型。独立字段是因为 credits 的形态
+			// （"x0 credits"）不好给客户端判断，而限免是「现在白用」的强信号。
+			"free": mi.Free,
 		}
 		if mi.OffPeakWindow != "" {
 			entry["off_peak"] = offPeakOf(mi)
@@ -277,6 +280,7 @@ func (h *Handler) Models() []map[string]any {
 			"reasoning_effort_config": strings.Join(mi.Efforts, "/"),
 			"upstream_key":            mi.UpstreamKey,
 			"credits":                 mi.Credits,
+			"free":                    mi.Free,
 			"thinking":                map[bool]string{true: "enabled", false: "disabled"}[mi.Reasoning],
 		}
 		if mi.OffPeakWindow != "" {
