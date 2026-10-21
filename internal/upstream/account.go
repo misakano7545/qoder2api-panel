@@ -94,6 +94,22 @@ func orgBucket(raw map[string]any) (map[string]any, int64) {
 	return org, cap
 }
 
+// expireSentinelMs 是上游「永不过期」的哨兵值 253402214400000（9999-12-31）。
+//
+// 原样透出会让「积分到期提醒」报出「290 万天后作废」这一行（国内 Free 号实测就是它），
+// 所以归一成 0 = 无到期信息：面板显示「—」，调度器的临期加成也不为它让路。
+// 借自 agent2api providers/qoder/balance.rs 的 EXPIRY_SENTINEL_MS。
+const expireSentinelMs = 253402214400000
+
+// expireSeconds 把上游的毫秒到期时刻换成秒；缺失与哨兵都给 0（无到期信息）。
+func expireSeconds(value any) int64 {
+	ms := int64Of(value)
+	if ms <= 0 || ms >= expireSentinelMs {
+		return 0
+	}
+	return ms / 1000
+}
+
 // UserEntUsageDetail 拉额度并归一成面板口径：个人额度 + 资源包剩余 + 组织包剩余。
 func (c *Client) UserEntUsageDetail(a *authState) (EntUsage, error) {
 	raw, err := c.FetchQuota(a)
@@ -110,9 +126,9 @@ func (c *Client) UserEntUsageDetail(a *authState) (EntUsage, error) {
 		total += orgTotal
 	}
 	out := EntUsage{Unit: UnitCredit, Remain: remain, Total: total}
-	out.Expire = int64Of(raw["expiresAt"]) / 1000
+	out.Expire = expireSeconds(raw["expiresAt"])
 	if out.Expire == 0 {
-		out.Expire = int64Of(raw["expireTime"]) / 1000
+		out.Expire = expireSeconds(raw["expireTime"])
 	}
 	if addOn == nil && quota == nil {
 		// 空结构 = 上游返回了异常形状（未登录/风控/结构变了），**不是**「剩余 0」。
@@ -167,7 +183,7 @@ func (c *Client) BalancePackages(a *authState) ([]CreditPackage, EntUsage, error
 			Remain: int64Of(addOn["remaining"]),
 			Size:   int64Of(addOn["total"]),
 			Used:   int64Of(addOn["used"]),
-			Expire: int64Of(addOn["expiresAt"]) / 1000,
+			Expire: expireSeconds(addOn["expiresAt"]),
 		})
 	}
 	if org, orgTotal := orgBucket(raw); org != nil {

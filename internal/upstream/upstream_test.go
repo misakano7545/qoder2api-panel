@@ -591,3 +591,20 @@ func TestPromotionPricing(t *testing.T) {
 		t.Fatalf("无 promotion 时应留空：%+v", plain)
 	}
 }
+
+// 到期哨兵：上游用 9999-12-31（毫秒 253402214400000）表示「永不过期」。原样透出会让
+// 「积分到期提醒」多出一行「290 万天后作废」，所以必须归一成 0（= 无到期信息）。
+func TestExpireSentinelIsNoExpiry(t *testing.T) {
+	if got := expireSeconds(float64(253402214400000)); got != 0 {
+		t.Errorf("哨兵应归一成 0，得到 %d", got)
+	}
+	if got := expireSeconds("253402214400000"); got != 0 {
+		t.Errorf("哨兵（字符串形态）应归一成 0，得到 %d", got)
+	}
+	if got := expireSeconds(float64(1793587456000)); got != 1793587456 {
+		t.Errorf("真实到期时间应保留：得到 %d", got)
+	}
+	if got := expireSeconds(nil); got != 0 {
+		t.Errorf("缺失应给 0，得到 %d", got)
+	}
+}

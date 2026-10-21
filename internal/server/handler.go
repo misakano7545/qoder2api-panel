@@ -564,6 +564,15 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 
 	attemptStart := time.Now()
 	rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
+	// 401：凭证可能还「很新」就被上游作废了（被顶下线/轮换过），此时预刷新不会动作，
+	// 拿的还是那张被拒的票。强制续期一张再给同一个号一次机会，比直接换号更划算——
+	// 单账号池里换号就等于直接失败。
+	if credentialDead(terr, status, respBody) && h.forceReauth(acct) {
+		if rc != nil {
+			rc.Close() // 第一次的响应体不再用，先释放连接
+		}
+		rc, status, respBody, terr = h.cfg.Upstream.ChatStream(acct, body)
+	}
 	if terr != nil {
 		// 出站失败也要分类：排队/额度不是账号故障，无脑 NoteError 会把好号推进熔断
 		// （实测：上游一整天 p3 排队，账号被自己的排队记成 breaker）。
@@ -636,6 +645,29 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 	h.bindSession(sessKey, acct.UID)
 	writeJSON(w, http.StatusOK, resp)
 	return true, nil
+}
+
+// credentialDead 判这次出站失败是不是「凭证被上游作废」（HTTP 401 或业务码 105）。
+func credentialDead(err error, status int, body []byte) bool {
+	var ue *upstream.Error
+	if errors.As(err, &ue) {
+		return ue.Kind == upstream.ErrSessionDead
+	}
+	return status >= 400 && upstream.Classify(status, string(body)) == upstream.ErrSessionDead
+}
+
+// forceReauth 不看到期时间直接换一张票，给 401 之后同账号重试一次用。
+// 失败返回 false：调用方按原错误走（不要用「续期失败」覆盖掉上游真正的错误文案）。
+func (h *Handler) forceReauth(acct *auth.Auth) bool {
+	if _, err := h.cfg.Upstream.ForceRefresh(acct); err != nil {
+		return false
+	}
+	if err := acct.SaveAtomic(); err != nil {
+		// refreshToken 每次换票都轮换：新值只有落盘成功才算真到手（与预刷新同一口径）。
+		log.Printf("token 落盘失败 uid=%s（重启后需重新登录该账号）: %v", acct.UID, err)
+	}
+	h.cfg.Pool.ClearSessionDead(acct.UID)
+	return true
 }
 
 // noteFailure 按错误类型记账（HTTP 级与流内错误共用这一张表）：

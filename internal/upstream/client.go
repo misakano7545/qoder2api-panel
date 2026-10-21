@@ -416,6 +416,13 @@ func (c *Client) RefreshTokenIfNeeded(a *auth.Auth, skew time.Duration) (bool, e
 	return c.refresh(a)
 }
 
+// ForceRefresh 不看到期时间直接续期。
+//
+// 401「凭证被上游作废」之后同账号重试一次用它：dt-/drt- 这一族可能在时间上还很新
+// 就被服务端作废（被顶下线、轮换过），此时按到期时间预刷新会拿回同一张被拒的票
+// （agent2api providers/qoder/chat.rs 的同款处置）。
+func (c *Client) ForceRefresh(a *auth.Auth) (bool, error) { return c.refresh(a) }
+
 func (c *Client) refresh(a *auth.Auth) (bool, error) {
 	key := fmt.Sprintf("%s|%s|%s", a.UID, a.JWT(), a.RefreshTokenValue())
 	c.flightMu.Lock()

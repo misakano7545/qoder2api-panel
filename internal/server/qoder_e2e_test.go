@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -328,5 +329,56 @@ func TestModelsList(t *testing.T) {
 	}
 	if !foundCN || !foundGlobal {
 		t.Errorf("模型列表应把两个地区分开列出（cn=%v global=%v）: %s", foundCN, foundGlobal, rec.Body.String())
+	}
+}
+
+// 401 之后必须强制续期并给同一个号再发一次：dt-/drt- 可能在还没到期时就被上游作废，
+// 此时按到期时间预刷新不动作，客户端会一直收到「登录态已失效」。
+func TestUnauthorizedForcesRefreshAndRetries(t *testing.T) {
+	var refreshes, chats atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/deviceToken/refresh":
+			// refreshToken 会轮换：新票的新旧值都不同于请求里那张，第二次 chat 才算数。
+			n := refreshes.Add(1)
+			_, _ = io.WriteString(w, `{"device_token":"dt-after-refresh","refresh_token":"drt-after-refresh","expires_at":`+
+				strconv.FormatInt(time.Now().Add(24*time.Hour).UnixMilli(), 10)+`}`)
+			if n > 1 {
+				t.Errorf("续期被调用了 %d 次（应只一次）", n)
+			}
+			return
+		case strings.HasPrefix(r.URL.Path, "/algo/api/v2/model/list"):
+			_, _ = io.WriteString(w, `{"chat":[{"key":"qmodel_38max","display_name":"Qwen3.8-Max","is_reasoning":true,"is_vl":true,"enable":true}]}`)
+			return
+		case strings.HasSuffix(r.URL.Path, "/agent_chat_generation"):
+			if chats.Add(1) == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"code":"105","message":"Login or access token expired"}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			envelope, _ := json.Marshal(map[string]any{"statusCodeValue": 200,
+				"body": `{"id":"c1","object":"chat.completion.chunk","model":"Qwen3.8-Max","choices":[{"index":0,"delta":{"content":"续上了"},"finish_reason":"stop"}]}`})
+			_, _ = io.WriteString(w, "data: "+string(envelope)+"\n\ndata: [DONE]\n\n")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"Qwen3.8-Max","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.chatCompletions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "续上了") {
+		t.Errorf("重试后应拿到正文，body=%s", rec.Body.String())
+	}
+	if refreshes.Load() != 1 || chats.Load() != 2 {
+		t.Errorf("续期 %d 次 / chat %d 次（期望各 1 次续期、2 次 chat）", refreshes.Load(), chats.Load())
 	}
 }
