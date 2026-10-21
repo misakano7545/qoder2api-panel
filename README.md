@@ -20,7 +20,7 @@
 > 协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现。
 
 > [!IMPORTANT]
-> **本仓的架构基线 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 已于 2026-10-21 停止维护**；Qoder 协议事实取自公开实现并用本仓测试固定，此后由本仓独立演进，**无官方支持与后续保障**。
+> **本仓独立演进**：面板架构沿用同族实现惯例，Qoder 协议事实取自公开实现并用本仓测试固定，此后由本仓自行推进，**无官方支持与后续保障**。
 >
 > **维护方式披露**：本仓的 issue / PR 处置、代码审查、测试与修复实现由 **Ekko Studio + Hermes Agent**（AI 编码 agent）辅助完成，合并与发布决策由维护者本人作出。作者是学生，因家庭经济困难，周末需兼职，业余还有摄影、公交等自己的兴趣——**本项目兴趣驱动，更新随缘，不代表作者有全部精力投入维护**，也可能出现较长时间没有提交，请勿当作有 SLA 的商业项目。
 >
