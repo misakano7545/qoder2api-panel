@@ -1,4 +1,41 @@
-# Qoder2API Panel
+<p align="center">
+  <h1>Qoder2API Panel</h1>
+</p>
+
+<p align="center">
+  <b>把 Qoder 编码助手通道包成 OpenAI / Anthropic 兼容 API 的多账号网关 · 附 Web 管理面板</b><br>
+  双区域 · COSY 签名转发 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 每日签到 · 单二进制 · 零第三方依赖
+</p>
+
+<p align="center">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="API" src="https://img.shields.io/badge/API-OpenAI%20%7C%20Anthropic-412991?style=flat-square">
+  <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-green?style=flat-square">
+</p>
+
+---
+
+> 架构与交互以 [WorkBuddy2API Panel](https://github.com/linguo2625469/workbuddy2api-panel) 为基线；
+> 协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现。
+
+> [!IMPORTANT]
+> **本仓的架构基线 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 已于 2026-10-21 停止维护**；Qoder 协议事实取自公开实现并用本仓测试固定，此后由本仓独立演进，**无官方支持与后续保障**。
+>
+> **维护方式披露**：本仓的 issue / PR 处置、代码审查、测试与修复实现由 **Ekko Studio + Hermes Agent**（AI 编码 agent）辅助完成，合并与发布决策由维护者本人作出。作者是学生，因家庭经济困难，周末需兼职，业余还有摄影、公交等自己的兴趣——**本项目兴趣驱动，更新随缘，不代表作者有全部精力投入维护**，也可能出现较长时间没有提交，请勿当作有 SLA 的商业项目。
+>
+> 风险自评：**上游随时可能收紧导致通道不可用**；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
+
+> [!WARNING]
+> **郑重提醒**——这段话针对两类人：**现实中与作者同校的使用者**，以及**拿本项目搭建对外中转站、做批量小号 / 售卖额度等恶意滥用的人**。
+>
+> 作者无法追踪、也不会去追踪任何人的行为，不对任何人行使监控。但必须把话说清楚：上述用法**严重违背上游项目作者与维护者的初衷**，也是消耗本仓作者维护动力的最大来源——本项目免费、开源、由一名学生用课余时间维护，不是给任何人拿去转卖的资源。
+>
+> 如果哪一天这个项目**确确实实让作者心力憔悴、不再有动力维护，本仓也会停止维护**，且不另行通知。上游的今天，可能就是本仓的明天，请自重。
+>
+> 同样的底线也适用于**同校使用者**：若有人出于一己私利，或以作者无法理解、也不知情的行为，把本项目的情况反映到**学校信息中心**、作者所在的**二级学院**，乃至**学院院长与校方其他上级领导**，藉此换取奖学金等个人好处，**本仓也会同时停止维护**。这不是赌气——接受核查、说明与后续处理所占用的时间与心力，已经超出本仓能承受的维护成本。
+
+## 项目简介
 
 把 [Qoder](https://qoder.com)（国际版 `qoder.com` / 国内版 `qoder.com.cn`）的编码助手通道
 包装成 **OpenAI 兼容网关**，自带一个 Web 管理面板：多账号池、熔断冷却、会话粘性、
@@ -6,11 +43,7 @@ COSY 签名转发、每日签到领 Credits、额度/套餐查询、模型目录
 
 单二进制 + 内嵌页面 + 一份 JSON 配置，**纯 Go 标准库，零第三方依赖**。
 
-> 架构与交互以 [WorkBuddy2API Panel](https://github.com/linguo2625469/workbuddy2api-panel) 为基线，
-> 上游协议换成 Qoder 的 COSY 签名体系；协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、
-> `nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现，并已用本仓测试固定下来。
-
-## 功能
+## 核心能力
 
 - **三种入站协议**：`POST /v1/chat/completions`（OpenAI chat，流式/非流式）、
   `POST /v1/responses`（Codex）、`POST /v1/messages` 与 `POST /messages`（Anthropic，支持 `x-api-key`）；
@@ -58,7 +91,7 @@ cp config.example.json config.json
 docker compose up -d          # 镜像内二进制 /app/q2api，数据在 ./auths 与 ./data
 ```
 
-## 用法
+## 接入客户端
 
 1. 面板 → **账号** → **添加账号**
    - 浏览器登录：选地区（国际版 / 国内版）→ 「打开」在新标签页完成 Qoder 授权 → 面板每 3 秒自动收号
@@ -121,6 +154,13 @@ login/* / accounts/* / checkin / balance / keepalive）。空 `api_key` 时只�
 版本串同一个号。本地构建显示 `dev`，CI 用 `-X main.appVersion=<tag>` 注入；推 `v*` 标签才会
 创建 Release 并推送镜像。
 
+## 安全与合规
+
+- **非官方、未获授权**：本文与上游服务商无任何关系，仅用于**本人授权账号**在本机 / 私有环境下的协议互操作。
+- **凭证**：`auths/*.json` 以 0600 明文保存，目录不得进入备份、同步盘或共享范围；仓库不含任何账号、token 或密钥。
+- **鉴权**：`api_key`（或 `api_keys`）为空时 `/v1/*` 与 `/panel/api/*` 不鉴权，仅适合 `127.0.0.1` 或可信内网；公网部署必须设密钥并前置 HTTPS 反代与访问限流。
+- **合规边界**：不得用于搭建对外中转站、共享他人账号、批量注册小号或售卖额度；作者不承担使用后果。
+
 ## 已知限制
 
 - **国内版签到**需要设备风控身份（UMID 那一套）。本仓未移植：国内号会拿到空活动列表并
@@ -143,3 +183,13 @@ go test ./...        # COSY 已知向量、凭证解析、SSE 信封、端到端
 没有真账号时联调全链路：`python3 scripts/qoder_stub.py 7899` 起假上游，另起一个实例把
 `upstream.gateway_host`/`gateway_host_cn` 指向 `http://127.0.0.1:7899/`、放一份假凭证进
 `auths/qoder-<uid>.json`，即可验证签名→组包→SSE 转换（桩会拒绝没有 COSY 头的请求）。
+
+## 血统与致谢
+
+- 架构与交互基线：[`linguo2625469/workbuddy2api-panel`](https://github.com/linguo2625469/workbuddy2api-panel)（2026-10-21 停止维护）。
+- 协议事实参考：`bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api`（只读参考，未直接合并其代码）。
+- 感谢上述项目的作者与维护者，把 COSY 签名与信封结构摊开成可验证的公开实现。
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。
