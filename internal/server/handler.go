@@ -639,7 +639,7 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 }
 
 // noteFailure 按错误类型记账（HTTP 级与流内错误共用这一张表）：
-//   - 1005 权益不足 → 计划硬冷却（plan_credit）；
+//   - 1005 权益不足 → 计划硬冷却（到北京 0 点，plan_credit 是上限）；
 //   - 429/4008 限流 → 软冷却（指数退避到 soft_rate_max）；
 //   - 401 session 失效 → 连续达阈值才禁用；
 //   - 5xx → 熔断计数；

@@ -36,7 +36,10 @@ type Config struct {
 	DefaultModel string `json:"default_model"` // "Auto"
 
 	Cooldown struct {
-		// PlanCredit 额度不足/套餐不支持时的硬冷却时长。
+		// PlanCredit 额度不足/套餐不支持时的硬冷却**上限**。
+		//
+		// ⚠️ 它不是固定时长：实际冷却到北京时间次日 0 点（额度重置点），本值只做上限截断
+		// —— 误判成权益不足时最多损失这么久（见 pool.planCooldownAt）。
 		PlanCredit string `json:"plan_credit"` // "12h"
 		// SoftRate 软限流（429/404）冷却基数；SoftRateMax 是反复触发时指数退避的封顶。
 		SoftRate    string `json:"soft_rate"`     // "60s"

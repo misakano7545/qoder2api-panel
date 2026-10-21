@@ -623,8 +623,25 @@ func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError
 }
 
 // finishStream 收尾：空流报错（调用方还能换号），否则补 finish_reason 与 [DONE]。
+//
+// 「零输出」有两种形态，都判失败：
+//  1. 一帧正文都没有、连 finish 也没给；
+//  2. 只回了 finish_reason=length、正文一个字没有 —— 越过上下文墙时上游的形态：请求
+//     被收下、输入被整段拒掉，却回一个「正常结束」的终止帧。
+//
+// 第二种原先被放过：finish 非空 ⇒ 旧判据 `!sawAny && finish == ""` 不成立 ⇒ 照常补
+// finish_reason 与 [DONE]，客户端拿到 HTTP 200 + 空回复且没有任何错误可依，整轮静默
+// 失败（上层只能靠用户投诉发现）。
+//
+// ⚠️ 只在 length 上生效：finish=stop 的空回复仍照原样透出 —— 那是服务端主动的空回答
+// （如安全拒答），换号只会把每个号都试一遍还得到同样结果。
+// ⚠️ 「length + 有正文」绝不能走这里：那是模型真答到输出上限，换号会丢掉已产出的正文，
+// 正确处置是让客户端自己续写。判据与 dsh-providers-hub 的 zero-output-guard.ts 一致
+// （max-tokens 且零输出）。max_tokens 是 Anthropic 口径的同一个值，见 messages.go 的映射。
+// ⚠️ 走这里时**还没写任何字节**（正文为空 ⇒ send 从未被调用），响应未提交，所以调用方
+// 换号重试是安全的 —— 与 handle() 里 sseError 那条「一个字节都没发」的判据同源。
 func finishStream(acc *accumulator, send func(map[string]any, string) error, done func() error) (map[string]any, error) {
-	if !acc.sawAny && acc.finish == "" {
+	if !acc.sawAny && (acc.finish == "" || acc.finish == "length" || acc.finish == "max_tokens") {
 		return nil, ErrEmptyStream
 	}
 	finish := acc.finish

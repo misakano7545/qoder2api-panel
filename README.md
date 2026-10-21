@@ -105,7 +105,7 @@ login/* / accounts/* / checkin / balance / keepalive）。空 `api_key` 时只�
 | `listen` / `api_key` | 监听地址；空 = 不鉴权（仅本机） |
 | `auth_dir` / `state_file` | 账号目录与池状态；用量台账与请求归档默认跟 `state_file` 同目录 |
 | `default_model` | 请求缺 `model` 或写 `auto` 时用，默认 `Auto` |
-| `cooldown.plan_credit` | 额度不足/套餐不支持的硬冷却（默认 12h） |
+| `cooldown.plan_credit` | 额度不足/套餐不支持的硬冷却**上限**（默认 12h）。实际冷到北京时间次日 0 点即额度重置点，本值只做上限截断 |
 | `upstream.gateway_host` / `gateway_host_cn` | 网关基址，留空用内置（`api3.qoder.sh` / `gateway.qoder.com.cn`） |
 | `upstream.timeout_seconds` / `header_timeout_seconds` / `idle_timeout_seconds` | 短请求 / 首字节 / 流内空闲 |
 | `pool.*` | 熔断、降权、在途、闲置补偿、快过期窗口 |

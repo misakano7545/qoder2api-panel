@@ -33,7 +33,7 @@ import (
 type CoolKind int
 
 const (
-	CoolPlan CoolKind = iota // 1005 plan 权益不足 → 12h 长冷却
+	CoolPlan CoolKind = iota // 1005 plan 权益不足 → 冷却到额度重置点（北京 0 点，见 planCooldownAt）
 	CoolSoft                 // 429/404 → 60s 短冷却（404 不累计 errCount）
 	CoolErr                  // 连续错误 → 10m 中冷却
 )
@@ -130,7 +130,7 @@ type Limits struct {
 	IdleWeightPerHour  float64
 	IdleWeightMax      float64
 	ExpiringSoon       time.Duration
-	PlanCooldown       time.Duration // 1005 硬冷却
+	PlanCooldown       time.Duration // 1005 硬冷却**上限**（实际取「到北京时间 0 点」，见 planCooldownAt）
 	SoftCooldown       time.Duration // 429/404 软冷却基数
 	SoftCooldownMax    time.Duration // 软冷却指数退避封顶
 }
@@ -928,14 +928,53 @@ func (p *Pool) CooldownSoft(uid, reason string) {
 	p.saveLocked()
 }
 
-// CooldownPlan 1005 权益不足的硬冷却（plan_credit，固定时长不叠加）。
+// CooldownPlan 1005 权益不足的硬冷却（只延长不叠加）。
 //
 // 时长在**锁内**取：原写法 p.Cooldown(uid, CoolPlan, p.lim.PlanCooldown, …) 的实参在进锁前
 // 求值，与 ApplyLimits 的整结构体写入（面板热改配置）构成数据竞争（-race 实测报警）。
 func (p *Pool) CooldownPlan(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.cooldownLocked(uid, p.lim.PlanCooldown, "plan 权益不足")
+	p.cooldownLocked(uid, planCooldownAt(poolNow(), p.lim.PlanCooldown), "plan 权益不足")
+}
+
+// poolNow 是 planCooldownAt 取当前时刻的注入点。
+//
+// ⚠️ 需要它是因为「到北京 0 点」与「固定 12h」在北京时间 0:00-12:00 段**取值完全相同**
+// （到 0 点还剩 12h 以上，被 cap 截断成 12h）—— 直接用 time.Now() 写用例，一天里有半天
+// 会假绿：把 CooldownPlan 改回固定 12h 也不会变红。单测把时钟拨到 23:40 这类时刻，
+// 两种实现才真正分叉（20 分钟 vs 12 小时）。
+var poolNow = time.Now
+
+// planDayOffset 是额度业务日边界相对 UTC 的固定偏移：Qoder 的额度按**北京时间 0 点**重置。
+//
+// ⚠️ 刻意不读部署时区（time.Local）：容器没装 tzdata 或 TZ 配错时，用本地时区算出来的
+// 「次日 0 点」会整体平移，冷却就会在额度真正恢复之前或之后结束。业务边界是上游的事实，
+// 与进程跑在哪个时区无关。
+const planDayOffset = 8 * time.Hour
+
+// planCooldownAt 计算「权益不足」硬冷却该持续多久：冷却到北京时间次日 0 点（额度重置点），
+// 再被 cap 截断（cap <= 0 表示不设上限）。
+//
+// 为什么不继续用固定 12h：固定的 12h 与重置点无关，两头都错 ——
+//   - 23:00 撞上，白等到次日 11:00 才回池（额度其实 0 点就恢复了，白躺 11 小时）；
+//   - 12:00 撞上，12 小时后正好是额度重新用满的时刻，回池即再撞一次。
+//
+// 取「到次日 0 点」后，回池时刻恒等于额度真正恢复的时刻（对照 dsh-providers-hub 的
+// qoder-adapter，它也是冷到 UTC+8 当日 24:00）。
+//
+// ⚠️ cap 保留而非砍掉：它是**误判兜底**。把一次偶发失败错记成「权益不足」时
+// （如 403 带 insufficient 文案），没有上限就会让好号躺满一整天；有上限最多损失 cap。
+// 默认 cap=12h 时，0:00-12:00 段实际仍按 12h 冷却，12:00-24:00 段才按到 0 点 ——
+// 而 12:00 之后正是额度被用光的常见时段。
+func planCooldownAt(now time.Time, cap time.Duration) time.Duration {
+	utc8 := now.UTC().Add(planDayOffset)
+	nextMidnight := time.Date(utc8.Year(), utc8.Month(), utc8.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+	until := nextMidnight.Sub(utc8)
+	if cap > 0 && until > cap {
+		return cap
+	}
+	return until
 }
 
 // NoteSuccess 成功请求重置连败计数与退避档位（成功即认为账号恢复正常）。
