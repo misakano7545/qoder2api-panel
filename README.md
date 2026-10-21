@@ -16,10 +16,10 @@
 
 ---
 
-> Qoder 协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现，并用本仓测试固定。
+> Qoder 协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现，并结合作者对本人账号的抓包分析印证。
 
 > [!IMPORTANT]
-> **本仓独立演进**：面板架构沿用同族实现惯例，Qoder 协议事实取自公开实现并用本仓测试固定，此后由本仓自行推进，**无官方支持与后续保障**。
+> **本仓独立演进**：面板架构沿用同族实现惯例，Qoder 协议事实**取自公开实现，并结合作者对本人账号的抓包分析印证**，此后由本仓自行推进，**无官方支持与后续保障**。
 >
 > **维护方式披露**：本仓的 issue / PR 处置、代码审查、测试与修复实现由 **Ekko Studio + Hermes Agent**（AI 编码 agent）辅助完成，合并与发布决策由维护者本人作出。作者是学生，因家庭经济困难，周末需兼职，业余还有摄影、公交等自己的兴趣——**本项目兴趣驱动，更新随缘，不代表作者有全部精力投入维护**，也可能出现较长时间没有提交，请勿当作有 SLA 的商业项目。
 >
@@ -185,7 +185,7 @@ go test ./...        # COSY 已知向量、凭证解析、SSE 信封、端到端
 
 ## 血统与致谢
 
-- 协议事实参考：`bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api`（只读参考，未直接合并其代码）。
+- 协议事实参考：`bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api`（只读参考，未直接合并其代码），并用作者对本人账号的抓包分析印证。
 - 感谢上述项目的作者与维护者，把 COSY 签名与信封结构摊开成可验证的公开实现。
 
 ## License
