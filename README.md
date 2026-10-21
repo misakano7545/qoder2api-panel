@@ -16,8 +16,7 @@
 
 ---
 
-> 架构与交互以 [WorkBuddy2API Panel](https://github.com/linguo2625469/workbuddy2api-panel) 为基线；
-> 协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现。
+> Qoder 协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现，并用本仓测试固定。
 
 > [!IMPORTANT]
 > **本仓独立演进**：面板架构沿用同族实现惯例，Qoder 协议事实取自公开实现并用本仓测试固定，此后由本仓自行推进，**无官方支持与后续保障**。
@@ -186,7 +185,6 @@ go test ./...        # COSY 已知向量、凭证解析、SSE 信封、端到端
 
 ## 血统与致谢
 
-- 架构与交互基线：[`linguo2625469/workbuddy2api-panel`](https://github.com/linguo2625469/workbuddy2api-panel)（2026-10-21 停止维护）。
 - 协议事实参考：`bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、`nullstacks/qoder2api`、`swysgh/qoder2api`（只读参考，未直接合并其代码）。
 - 感谢上述项目的作者与维护者，把 COSY 签名与信封结构摊开成可验证的公开实现。
 
