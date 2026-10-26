@@ -445,13 +445,19 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 
 // Stream 转发 SSE（不关心错误回调）。
 func Stream(w http.ResponseWriter, r io.Reader) error {
-	_, err := StreamWithError(w, r, nil)
+	_, err := StreamWithError(w, r, nil, nil)
 	return err
+}
+
+// StreamStat 流式观测面上的可选回填：ToolCalls 在帧真正写给客户端那一刻置 1。
+type StreamStat struct {
+	ToolCalls int
 }
 
 // StreamWithError 把上游信封里的内层 chunk 转成 OpenAI SSE 帧写给客户端。
 // 遇到流内业务错误时回调 onErr（非 nil）并注入错误帧收尾；返回末帧 usage。
-func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError)) (map[string]any, error) {
+// stat 非 nil 时回填流式观测量（见 StreamStat）。
+func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError), stat *StreamStat) (map[string]any, error) {
 	fl, _ := w.(http.Flusher)
 	var wrote bool
 	ensureHeaders := func() {
@@ -567,6 +573,9 @@ func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError
 				case deltaReasoning:
 					payload["reasoning_content"] = d.text
 				case deltaToolCall:
+					if stat != nil {
+						stat.ToolCalls = 1
+					}
 					call := map[string]any{"index": d.index, "type": "function", "function": map[string]any{}}
 					if d.id != "" {
 						call["id"] = d.id

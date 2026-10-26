@@ -41,6 +41,9 @@ type reqTrace struct {
 	CacheHitTokens   int64
 	Credit           float64
 	HasCredit        bool
+	// ToolsDeclared / ToolCalls 工具面观测量：声明数在开轮转前定格，调用数由每次尝试回填。
+	ToolsDeclared int
+	ToolCalls     int
 }
 
 // addUsage 把一次出站尝试的用量吸收进本请求的追踪游标。
@@ -245,6 +248,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		HasCredit:        tr.HasCredit,
 		CacheHitTokens:   tr.CacheHitTokens,
 		CacheMissTokens:  tr.cacheMissTokens(),
+		ToolsDeclared:    tr.ToolsDeclared,
+		ToolCalls:        tr.ToolCalls,
 		ClientIP:         tr.ClientIP,
 		UserAgent:        tr.UA,
 	})

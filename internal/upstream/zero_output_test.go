@@ -24,7 +24,7 @@ func TestStreamZeroOutputLength(t *testing.T) {
 			`{"id":"c1","model":"DeepSeek-V4-Pro","choices":[{"index":0,"delta":{},"finish_reason":"` + finish + `"}]}`,
 		)
 		rec := httptest.NewRecorder()
-		_, err := StreamWithError(rec, strings.NewReader(stream), nil)
+		_, err := StreamWithError(rec, strings.NewReader(stream), nil, nil)
 		if err != ErrEmptyStream {
 			t.Errorf("finish_reason=%s 且零输出：应返回 ErrEmptyStream，得到 %v", finish, err)
 		}
@@ -42,7 +42,7 @@ func TestStreamLengthWithContent(t *testing.T) {
 		`{"id":"c1","model":"DeepSeek-V4-Pro","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`,
 	)
 	rec := httptest.NewRecorder()
-	if _, err := StreamWithError(rec, strings.NewReader(stream), nil); err != nil {
+	if _, err := StreamWithError(rec, strings.NewReader(stream), nil, nil); err != nil {
 		t.Fatalf("有正文时不该报错，得到 %v", err)
 	}
 	out := rec.Body.String()
@@ -60,7 +60,7 @@ func TestStreamEmptyStopStillPasses(t *testing.T) {
 		`{"id":"c1","model":"DeepSeek-V4-Pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 	)
 	rec := httptest.NewRecorder()
-	if _, err := StreamWithError(rec, strings.NewReader(stream), nil); err != nil {
+	if _, err := StreamWithError(rec, strings.NewReader(stream), nil, nil); err != nil {
 		t.Fatalf("stop 的空回复应透出，得到 %v", err)
 	}
 	if !strings.Contains(rec.Body.String(), `"finish_reason":"stop"`) {

@@ -69,7 +69,7 @@ func TestStreamAbortsOnReasoningLoop(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	var got *StreamError
-	_, err := StreamWithError(rec, strings.NewReader(b.String()), func(se *StreamError) { got = se })
+	_, err := StreamWithError(rec, strings.NewReader(b.String()), func(se *StreamError) { got = se }, nil)
 	if err != nil {
 		t.Fatalf("流式不应把复读当调用失败：%v", err)
 	}

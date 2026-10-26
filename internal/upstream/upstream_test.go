@@ -162,7 +162,7 @@ func TestStreamWritesFrames(t *testing.T) {
 		`{"id":"c1","model":"Qwen3.8-Max","choices":[{"index":0,"delta":{"content":"好"},"finish_reason":"stop"}]}`,
 	)
 	rec := httptest.NewRecorder()
-	usage, err := StreamWithError(rec, strings.NewReader(stream), nil)
+	usage, err := StreamWithError(rec, strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("StreamWithError 出错: %v", err)
 	}

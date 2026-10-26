@@ -85,6 +85,11 @@ type Event struct {
 	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
+
+	// ToolsDeclared / ToolCalls 客户端声明的工具数与实际发生的调用数：声明 >0 而调用 ==0
+	// 的完成轮与正常收尾在归档里一模一样，两个数一起才判得出「模型停摆」。
+	ToolsDeclared int `json:"tools_declared,omitempty"`
+	ToolCalls     int `json:"tool_calls,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
