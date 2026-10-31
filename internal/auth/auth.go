@@ -17,17 +17,14 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/misakano7545/qoder2api-panel/internal/safefile"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
-
-// tmpSeq 让同一个账号文件的临时名在进程内唯一（见 saveAtomicLocked）。
-var tmpSeq atomic.Uint64
 
 // 地区（realm）：国际版与国内版是两套 host、两套凭证，互不通用。
 const (
@@ -429,15 +426,7 @@ func (a *Auth) saveAtomicLocked() error {
 	}
 	// 同一个文件可能被两个不同的 *Auth 对象写（面板登录新建的 vs 池里的），
 	// 对象级锁保护不到；临时名带 pid + 序号，避免互相截断成半截 JSON。
-	tmp := fmt.Sprintf("%s.tmp.%d.%d", a.FilePath, os.Getpid(), tmpSeq.Add(1))
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, a.FilePath); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return safefile.Write(a.FilePath, raw, 0o600)
 }
 
 // LoadDir 扫描 dir 下 qoder-*.json。解析失败的文件跳过并留日志（静默跳过 = 账号凭空消失）。
